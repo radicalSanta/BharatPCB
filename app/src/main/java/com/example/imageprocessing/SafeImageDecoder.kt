@@ -59,9 +59,10 @@ object SafeImageDecoder {
         openStream: () -> InputStream?
     ): DecodedFrame? {
         val boundsOptions = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        openStream()?.use { stream ->
+        val boundsStream = openStream() ?: return null
+        boundsStream.use { stream ->
             BitmapFactory.decodeStream(stream, null, boundsOptions)
-        } ?: return null
+        }
 
         val rawW = boundsOptions.outWidth
         val rawH = boundsOptions.outHeight
@@ -80,7 +81,14 @@ object SafeImageDecoder {
             BitmapFactory.decodeStream(stream, null, decodeOptions)
         } ?: return null
 
-        val orientedBitmap = applyExifTransform(sampledBitmap, exifOrientation)
+        var orientedBitmap: Bitmap? = null
+        val finalBitmap = try {
+            applyExifTransform(sampledBitmap, exifOrientation).also { orientedBitmap = it }
+        } finally {
+            if (orientedBitmap !== sampledBitmap && !sampledBitmap.isRecycled) {
+                sampledBitmap.recycle()
+            }
+        }
         val (logicalW, logicalH) = if (degrees == 90 || degrees == 270) {
             rawH to rawW
         } else {
@@ -88,7 +96,7 @@ object SafeImageDecoder {
         }
 
         return DecodedFrame(
-            bitmap = orientedBitmap,
+            bitmap = finalBitmap,
             originalWidth = logicalW,
             originalHeight = logicalH,
             orientationDegrees = degrees
@@ -149,34 +157,40 @@ object SafeImageDecoder {
             )
         }
 
-        val logicalW = frame.originalWidth
-        val logicalH = frame.originalHeight
-        if (logicalW < minWidth || logicalH < minHeight) {
-            return ImageValidationResult(
-                isValid = false,
-                isProcessable = false,
+        return try {
+            val logicalW = frame.originalWidth
+            val logicalH = frame.originalHeight
+            if (logicalW < minWidth || logicalH < minHeight) {
+                return ImageValidationResult(
+                    isValid = false,
+                    isProcessable = false,
+                    width = logicalW,
+                    height = logicalH,
+                    clarityScore = null,
+                    lowClarityRisk = true,
+                    orientationDegrees = frame.orientationDegrees,
+                    errorMessage = "Image resolution ${logicalW}x${logicalH} is below minimum ${minWidth}x${minHeight}."
+                )
+            }
+
+            val clarityScore = computeLaplacianVarianceHeuristic(frame.bitmap)
+            val lowClarityRisk = clarityScore < DEFAULT_LOW_CLARITY_VARIANCE_THRESHOLD
+
+            ImageValidationResult(
+                isValid = true,
+                isProcessable = true,
                 width = logicalW,
                 height = logicalH,
-                clarityScore = null,
-                lowClarityRisk = true,
+                clarityScore = clarityScore,
+                lowClarityRisk = lowClarityRisk,
                 orientationDegrees = frame.orientationDegrees,
-                errorMessage = "Image resolution ${logicalW}x${logicalH} is below minimum ${minWidth}x${minHeight}."
+                errorMessage = null
             )
+        } finally {
+            if (!frame.bitmap.isRecycled) {
+                frame.bitmap.recycle()
+            }
         }
-
-        val clarityScore = computeLaplacianVarianceHeuristic(frame.bitmap)
-        val lowClarityRisk = clarityScore < DEFAULT_LOW_CLARITY_VARIANCE_THRESHOLD
-
-        return ImageValidationResult(
-            isValid = true,
-            isProcessable = true,
-            width = logicalW,
-            height = logicalH,
-            clarityScore = clarityScore,
-            lowClarityRisk = lowClarityRisk,
-            orientationDegrees = frame.orientationDegrees,
-            errorMessage = null
-        )
     }
 
     /**
@@ -189,18 +203,30 @@ object SafeImageDecoder {
         val targetW = if (scale > 1f) (bitmap.width / scale).toInt().coerceAtLeast(16) else bitmap.width
         val targetH = if (scale > 1f) (bitmap.height / scale).toInt().coerceAtLeast(16) else bitmap.height
 
-        val working = if (targetW != bitmap.width || targetH != bitmap.height) {
-            Bitmap.createScaledBitmap(bitmap, targetW, targetH, true)
-        } else {
-            bitmap
+        var scaledWorking: Bitmap? = null
+        val w: Int
+        val h: Int
+        val pixels: IntArray
+        try {
+            val working = if (targetW != bitmap.width || targetH != bitmap.height) {
+                Bitmap.createScaledBitmap(bitmap, targetW, targetH, true).also {
+                    if (it !== bitmap) scaledWorking = it
+                }
+            } else {
+                bitmap
+            }
+
+            w = working.width
+            h = working.height
+            if (w < 3 || h < 3) return 0.0
+
+            pixels = IntArray(w * h)
+            working.getPixels(pixels, 0, w, 0, 0, w, h)
+        } finally {
+            scaledWorking?.let { tmp ->
+                if (tmp !== bitmap && !tmp.isRecycled) tmp.recycle()
+            }
         }
-
-        val w = working.width
-        val h = working.height
-        if (w < 3 || h < 3) return 0.0
-
-        val pixels = IntArray(w * h)
-        working.getPixels(pixels, 0, w, 0, 0, w, h)
 
         val luma = DoubleArray(w * h)
         for (i in pixels.indices) {

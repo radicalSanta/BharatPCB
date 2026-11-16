@@ -15,7 +15,12 @@ data class RawDetectionCandidate(
 
 object NonMaxSuppression {
 
-    fun applyClassWiseNms(
+    /**
+     * Global class-agnostic NMS matching cv2.dnn.NMSBoxes in vision_runtime.py:
+     * candidate boxes are sorted by descending confidence and any lower-scoring box
+     * with IoU > iouThreshold against an already-kept box is suppressed regardless of classId.
+     */
+    fun applyClassAgnosticNms(
         candidates: List<RawDetectionCandidate>,
         iouThreshold: Float = 0.45f,
         maxDetections: Int = 100
@@ -28,7 +33,7 @@ object NonMaxSuppression {
         for (candidate in sorted) {
             var suppressed = false
             for (kept in selected) {
-                if (kept.classIndex == candidate.classIndex && iou(kept, candidate) > iouThreshold) {
+                if (iou(kept, candidate) > iouThreshold) {
                     suppressed = true
                     break
                 }

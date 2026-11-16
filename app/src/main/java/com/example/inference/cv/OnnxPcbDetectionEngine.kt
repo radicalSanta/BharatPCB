@@ -59,6 +59,7 @@ class OnnxPcbDetectionEngine(
         val inputHeight: Int,
         val outputShape: LongArray,
         val classLabels: List<String>,
+        val hasEmbeddedClassMetadata: Boolean,
         val sha256: String,
         val fileName: String,
         val contractVersion: String
@@ -203,75 +204,84 @@ class OnnxPcbDetectionEngine(
                         provenance = currentProvenance(contract)
                     )
 
-                    val tensorInput = YoloPreprocessor.prepareNchwFloatInput(
-                        bitmap = decoded.bitmap,
-                        targetWidth = contract.inputWidth,
-                        targetHeight = contract.inputHeight
-                    )
-                    preprocessMs = (System.currentTimeMillis() - prepStart).coerceAtLeast(1L)
+                    return@withContext try {
+                        val tensorInput = YoloPreprocessor.prepareNchwFloatInput(
+                            bitmap = decoded.bitmap,
+                            targetWidth = contract.inputWidth,
+                            targetHeight = contract.inputHeight
+                        )
+                        preprocessMs = (System.currentTimeMillis() - prepStart).coerceAtLeast(1L)
 
-                    val inferStart = System.currentTimeMillis()
-                    var flatOutput: FloatArray? = null
-                    var outputShape: LongArray? = null
+                        val inferStart = System.currentTimeMillis()
+                        var flatOutput: FloatArray? = null
+                        var outputShape: LongArray? = null
 
-                    OnnxTensor.createTensor(env, tensorInput.floatBuffer, tensorInput.shape).use { inputTensor ->
-                        session.run(mapOf(contract.inputName to inputTensor)).use { results ->
-                            inferenceMs = (System.currentTimeMillis() - inferStart).coerceAtLeast(1L)
-                            val outValue = results.get(contract.outputName).orElse(null)
-                                ?: results.get(0)
-                            val outTensor = outValue as? OnnxTensor
-                                ?: return@withContext DetectionOutcome.Failure(
-                                    errorType = DetectionErrorType.OUTPUT_SHAPE_MISMATCH,
-                                    errorMessage = "Primary ONNX output is not a tensor.",
+                        OnnxTensor.createTensor(env, tensorInput.floatBuffer, tensorInput.shape).use { inputTensor ->
+                            session.run(mapOf(contract.inputName to inputTensor)).use { results ->
+                                inferenceMs = (System.currentTimeMillis() - inferStart).coerceAtLeast(1L)
+                                val outValue = results.get(contract.outputName).orElse(null)
+                                    ?: results.get(0)
+                                val outTensor = outValue as? OnnxTensor
+                                    ?: return@withContext DetectionOutcome.Failure(
+                                        errorType = DetectionErrorType.OUTPUT_SHAPE_MISMATCH,
+                                        errorMessage = "Primary ONNX output is not a tensor.",
+                                        latencyMetrics = InspectionLatencyMetrics(
+                                            imagePreprocessingMs = preprocessMs,
+                                            yoloInferenceMs = inferenceMs
+                                        ),
+                                        provenance = currentProvenance(contract)
+                                    )
+                                val info = outTensor.info
+                                outputShape = info.shape
+                                val buffer = outTensor.floatBuffer
+                                val floats = FloatArray(buffer.remaining())
+                                buffer.get(floats)
+                                flatOutput = floats
+                            }
+                        }
+
+                        val decodeStart = System.currentTimeMillis()
+                        val decodedResult = YoloOutputDecoder.decode(
+                            flatData = flatOutput!!,
+                            shape = outputShape!!,
+                            classLabels = contract.classLabels,
+                            transform = tensorInput.transform,
+                            sourceBitmap = decoded.bitmap,
+                            confidenceThreshold = YoloOutputDecoder.DEFAULT_CONFIDENCE_THRESHOLD,
+                            iouThreshold = YoloOutputDecoder.DEFAULT_IOU_THRESHOLD
+                        )
+                        decodeMs = (System.currentTimeMillis() - decodeStart).coerceAtLeast(1L)
+
+                        when (decodedResult) {
+                            is YoloDecodeResult.Success -> {
+                                DetectionOutcome.Success(
+                                    detections = decodedResult.detections,
                                     latencyMetrics = InspectionLatencyMetrics(
                                         imagePreprocessingMs = preprocessMs,
-                                        yoloInferenceMs = inferenceMs
+                                        yoloInferenceMs = inferenceMs,
+                                        outputDecodingNmsMs = decodeMs,
+                                        totalDurationMs = (System.currentTimeMillis() - totalStart).coerceAtLeast(1L)
+                                    ),
+                                    provenance = currentProvenance(contract),
+                                    isDemonstration = false
+                                )
+                            }
+                            is YoloDecodeResult.UnsupportedShape -> {
+                                DetectionOutcome.Failure(
+                                    errorType = DetectionErrorType.OUTPUT_SHAPE_MISMATCH,
+                                    errorMessage = decodedResult.message,
+                                    latencyMetrics = InspectionLatencyMetrics(
+                                        imagePreprocessingMs = preprocessMs,
+                                        yoloInferenceMs = inferenceMs,
+                                        outputDecodingNmsMs = decodeMs
                                     ),
                                     provenance = currentProvenance(contract)
                                 )
-                            val info = outTensor.info
-                            outputShape = info.shape
-                            val buffer = outTensor.floatBuffer
-                            val floats = FloatArray(buffer.remaining())
-                            buffer.get(floats)
-                            flatOutput = floats
+                            }
                         }
-                    }
-
-                    val decodeStart = System.currentTimeMillis()
-                    val decodedResult = YoloOutputDecoder.decode(
-                        flatData = flatOutput!!,
-                        shape = outputShape!!,
-                        classLabels = contract.classLabels,
-                        transform = tensorInput.transform
-                    )
-                    decodeMs = (System.currentTimeMillis() - decodeStart).coerceAtLeast(1L)
-
-                    return@withContext when (decodedResult) {
-                        is YoloDecodeResult.Success -> {
-                            DetectionOutcome.Success(
-                                detections = decodedResult.detections,
-                                latencyMetrics = InspectionLatencyMetrics(
-                                    imagePreprocessingMs = preprocessMs,
-                                    yoloInferenceMs = inferenceMs,
-                                    outputDecodingNmsMs = decodeMs,
-                                    totalDurationMs = (System.currentTimeMillis() - totalStart).coerceAtLeast(1L)
-                                ),
-                                provenance = currentProvenance(contract),
-                                isDemonstration = false
-                            )
-                        }
-                        is YoloDecodeResult.UnsupportedShape -> {
-                            DetectionOutcome.Failure(
-                                errorType = DetectionErrorType.OUTPUT_SHAPE_MISMATCH,
-                                errorMessage = decodedResult.message,
-                                latencyMetrics = InspectionLatencyMetrics(
-                                    imagePreprocessingMs = preprocessMs,
-                                    yoloInferenceMs = inferenceMs,
-                                    outputDecodingNmsMs = decodeMs
-                                ),
-                                provenance = currentProvenance(contract)
-                            )
+                    } finally {
+                        if (!decoded.bitmap.isRecycled) {
+                            decoded.bitmap.recycle()
                         }
                     }
                 } catch (e: OutOfMemoryError) {
@@ -335,7 +345,8 @@ class OnnxPcbDetectionEngine(
             if (contract != null) {
                 appendLine("Input Node: ${contract.inputName} [1, 3, ${contract.inputHeight}, ${contract.inputWidth}]")
                 appendLine("Output Node: ${contract.outputName} ${contract.outputShape.contentToString()}")
-                appendLine("Classes (${contract.classLabels.size}): ${contract.classLabels.joinToString(", ")}")
+                val sourceNote = if (contract.hasEmbeddedClassMetadata) "embedded ONNX metadata" else "spec 11-class binding (no embedded 'names' key)"
+                appendLine("Classes (${contract.classLabels.size}, $sourceNote): ${contract.classLabels.joinToString(", ")}")
                 appendLine("Contract Version: ${contract.contractVersion}")
             }
         }
@@ -352,16 +363,14 @@ class OnnxPcbDetectionEngine(
         val inputName = inputEntry.key
         val inputInfo = inputEntry.value.info as? TensorInfo
             ?: error("Primary ONNX input '$inputName' is not a tensor.")
-        require(inputInfo.type == OnnxJavaType.FLOAT) {
-            "Unsupported input tensor dtype ${inputInfo.type}; expected FLOAT32."
-        }
-        val inShape = inputInfo.shape
-        require(inShape.size == 4 && (inShape[1] == 3L || inShape[1] == -1L)) {
-            "Expected 4D NCHW RGB input shape [1,3,H,W], found ${inShape.contentToString()}."
-        }
+        OnnxContractValidator.validateInputSignature(
+            inputName = inputName,
+            inputType = inputInfo.type,
+            inputShape = inputInfo.shape
+        )
 
-        val inputH = if (inShape[2] > 0) inShape[2].toInt() else 640
-        val inputW = if (inShape[3] > 0) inShape[3].toInt() else 640
+        val inputH = OnnxContractValidator.EXPECTED_INPUT_SIZE
+        val inputW = OnnxContractValidator.EXPECTED_INPUT_SIZE
 
         val outputEntry = session.outputInfo.entries.firstOrNull()
             ?: error("ONNX model has no output nodes.")
@@ -369,46 +378,44 @@ class OnnxPcbDetectionEngine(
         val outputInfo = outputEntry.value.info as? TensorInfo
             ?: error("Primary ONNX output '$outputName' is not a tensor.")
         require(outputInfo.type == OnnxJavaType.FLOAT) {
-            "Unsupported output tensor dtype ${outputInfo.type}; expected FLOAT32."
+            "Unsupported output tensor dtype ${outputInfo.type}; expected FLOAT (FP32)."
         }
 
-        // Run a real smoke tensor pass so dynamic shapes resolve and session execution is proven
+        // Run a real smoke tensor pass so dynamic batch shapes resolve and execution is proven
         val smokeBuffer = FloatBuffer.allocate(3 * inputH * inputW)
         val smokeShape = longArrayOf(1L, 3L, inputH.toLong(), inputW.toLong())
         var resolvedOutputShape = outputInfo.shape
+        var resolvedOutputType = outputInfo.type
 
         OnnxTensor.createTensor(env, smokeBuffer, smokeShape).use { smokeTensor ->
             session.run(mapOf(inputName to smokeTensor)).use { smokeResult ->
                 val outTensor = smokeResult.get(outputName).orElse(null) as? OnnxTensor
                     ?: error("Smoke inference failed to return a valid OnnxTensor.")
                 resolvedOutputShape = outTensor.info.shape
+                resolvedOutputType = outTensor.info.type
             }
         }
 
-        val labels = parseMetadataClassNames(session) ?: DefectTaxonomy.expectedDatasetLabelsByIndex
-        val contractVersion = "onnx-nchw-${inputW}x${inputH}-c${labels.size}"
+        val customMetadata = session.metadata?.customMetadata ?: emptyMap()
+        val validatedContract = OnnxContractValidator.validateResolvedContract(
+            outputName = outputName,
+            outputType = resolvedOutputType,
+            resolvedOutputShape = resolvedOutputShape,
+            customMetadata = customMetadata
+        )
 
         return InspectedOnnxContract(
             inputName = inputName,
             outputName = outputName,
-            inputWidth = inputW,
-            inputHeight = inputH,
+            inputWidth = validatedContract.inputWidth,
+            inputHeight = validatedContract.inputHeight,
             outputShape = resolvedOutputShape,
-            classLabels = labels,
+            classLabels = validatedContract.classLabels,
+            hasEmbeddedClassMetadata = validatedContract.hasEmbeddedClassMetadata,
             sha256 = sha256,
             fileName = fileName,
-            contractVersion = contractVersion
+            contractVersion = validatedContract.contractVersion
         )
-    }
-
-    private fun parseMetadataClassNames(session: OrtSession): List<String>? {
-        val rawNames = session.metadata?.customMetadata?.get("names") ?: return null
-        // Parses Python dict style "{0: 'open', 1: 'short', ...}" if present in Ultralytics export
-        val regex = Regex("""(\d+)\s*:\s*['"]([^'"]+)['"]""")
-        val matches = regex.findAll(rawNames).toList()
-        if (matches.isEmpty()) return null
-        return matches.sortedBy { it.groupValues[1].toIntOrNull() ?: Int.MAX_VALUE }
-            .map { it.groupValues[2].trim() }
     }
 
     private fun currentProvenance(contract: InspectedOnnxContract?): ModelExecutionProvenance {

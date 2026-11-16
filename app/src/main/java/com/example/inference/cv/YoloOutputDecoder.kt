@@ -1,8 +1,11 @@
 package com.example.inference.cv
 
+import android.graphics.Bitmap
+import com.example.domain.model.BoundingBox
 import com.example.domain.model.DetectedDefect
 import com.example.domain.policy.DefectTaxonomy
 import java.util.UUID
+import kotlin.math.max
 
 sealed interface YoloDecodeResult {
     data class Success(val detections: List<DetectedDefect>) : YoloDecodeResult
@@ -10,23 +13,24 @@ sealed interface YoloDecodeResult {
 }
 
 object YoloOutputDecoder {
-    const val DECODER_VERSION = "yolo-v8-adaptive-v1"
-    const val DEFAULT_CONFIDENCE_THRESHOLD = 0.25f
+    const val DECODER_VERSION = "yolo-v8-640-fp32-v2"
+    const val DEFAULT_CONFIDENCE_THRESHOLD = 0.33f
     const val DEFAULT_IOU_THRESHOLD = 0.45f
+    const val BORDER_GUARD_MARGIN_PX = 8.0f
+    const val BORDER_GUARD_MAX_CONF = 0.50f
+    const val BORDER_GUARD_MAX_AREA_PCT = 2.5
 
     /**
-     * Decodes a 3D [1, dim1, dim2] or 2D [N, 6] YOLOv8 ONNX output tensor.
-     *
-     * Supported layouts (validated dynamically from inspected tensor shape):
-     * - [1, 4 + C, N]: standard Ultralytics YOLOv8 raw detection head
-     * - [1, N, 4 + C]: transposed raw detection head
-     * - [1, N, 6] or [N, 6]: embedded NMS output [x1, y1, x2, y2, score, class_id]
+     * Decodes a 3D [1, 4 + C, N] (e.g. [1, 15, 8400]) or [1, N, 4 + C] YOLOv8 ONNX output tensor,
+     * reverses letterbox coordinates back to original frame space, applies global class-agnostic NMS,
+     * filters edge border-crop noise, and runs populated green-PCB HSV refinement for class ID 9.
      */
     fun decode(
         flatData: FloatArray,
         shape: LongArray,
         classLabels: List<String>,
         transform: LetterboxTransform,
+        sourceBitmap: Bitmap? = null,
         confidenceThreshold: Float = DEFAULT_CONFIDENCE_THRESHOLD,
         iouThreshold: Float = DEFAULT_IOU_THRESHOLD
     ): YoloDecodeResult {
@@ -37,19 +41,9 @@ object YoloOutputDecoder {
         val numClasses = classLabels.size
         val expectedChannels = 4 + numClasses
 
-        // Case A: Embedded NMS 2D [N, 6]
-        if (shape.size == 2 && shape[1] == 6L) {
-            val count = shape[0].toInt()
-            if (flatData.size < count * 6) {
-                return YoloDecodeResult.UnsupportedShape("Output buffer size mismatch for [N, 6].")
-            }
-            val detections = decodeEmbeddedNmsRows(flatData, count, classLabels, transform, confidenceThreshold)
-            return YoloDecodeResult.Success(detections)
-        }
-
         if (shape.size != 3 || shape[0] != 1L) {
             return YoloDecodeResult.UnsupportedShape(
-                "Unsupported ONNX output shape ${shape.contentToString()}; expected [1, $expectedChannels, N], [1, N, $expectedChannels], or [1, N, 6]."
+                "Unsupported ONNX output shape ${shape.contentToString()}; expected [1, $expectedChannels, N] or [1, N, $expectedChannels]."
             )
         }
 
@@ -61,24 +55,18 @@ object YoloOutputDecoder {
             )
         }
 
-        // Case B: Embedded NMS [1, N, 6] (only when numClasses != 2, which holds since numClasses == 11)
-        if (d2 == 6 && d2 != expectedChannels) {
-            val detections = decodeEmbeddedNmsRows(flatData, d1, classLabels, transform, confidenceThreshold)
-            return YoloDecodeResult.Success(detections)
-        }
-
-        val candidates = mutableListOf<RawDetectionCandidate>()
+        val originalSpaceCandidates = mutableListOf<RawDetectionCandidate>()
 
         when {
-            // Case C: Standard YOLOv8 [1, 4 + C, N]
+            // Standard YOLOv8 [1, 4 + C, N] -> transposed to [N, 4 + C]
             d1 == expectedChannels -> {
                 val numBoxes = d2
                 for (b in 0 until numBoxes) {
                     var bestClass = -1
-                    var bestScore = 0f
+                    var bestScore = Float.NEGATIVE_INFINITY
                     for (c in 0 until numClasses) {
                         val score = flatData[(4 + c) * numBoxes + b]
-                        if (score > bestScore) {
+                        if (score.isFinite() && score > bestScore) {
                             bestScore = score
                             bestClass = c
                         }
@@ -88,30 +76,30 @@ object YoloOutputDecoder {
                         val cy = flatData[1 * numBoxes + b]
                         val bw = flatData[2 * numBoxes + b]
                         val bh = flatData[3 * numBoxes + b]
-                        candidates.add(
-                            RawDetectionCandidate(
-                                classIndex = bestClass,
-                                confidence = bestScore.coerceIn(0f, 1f),
-                                x1Px = cx - bw / 2f,
-                                y1Px = cy - bh / 2f,
-                                x2Px = cx + bw / 2f,
-                                y2Px = cy + bh / 2f
-                            )
+                        addOriginalSpaceCandidate(
+                            candidates = originalSpaceCandidates,
+                            transform = transform,
+                            classIndex = bestClass,
+                            confidence = bestScore,
+                            cx = cx,
+                            cy = cy,
+                            bw = bw,
+                            bh = bh
                         )
                     }
                 }
             }
-            // Case D: Transposed YOLOv8 [1, N, 4 + C]
+            // Transposed YOLOv8 [1, N, 4 + C]
             d2 == expectedChannels -> {
                 val numBoxes = d1
                 val stride = expectedChannels
                 for (b in 0 until numBoxes) {
                     val base = b * stride
                     var bestClass = -1
-                    var bestScore = 0f
+                    var bestScore = Float.NEGATIVE_INFINITY
                     for (c in 0 until numClasses) {
                         val score = flatData[base + 4 + c]
-                        if (score > bestScore) {
+                        if (score.isFinite() && score > bestScore) {
                             bestScore = score
                             bestClass = c
                         }
@@ -121,15 +109,15 @@ object YoloOutputDecoder {
                         val cy = flatData[base + 1]
                         val bw = flatData[base + 2]
                         val bh = flatData[base + 3]
-                        candidates.add(
-                            RawDetectionCandidate(
-                                classIndex = bestClass,
-                                confidence = bestScore.coerceIn(0f, 1f),
-                                x1Px = cx - bw / 2f,
-                                y1Px = cy - bh / 2f,
-                                x2Px = cx + bw / 2f,
-                                y2Px = cy + bh / 2f
-                            )
+                        addOriginalSpaceCandidate(
+                            candidates = originalSpaceCandidates,
+                            transform = transform,
+                            classIndex = bestClass,
+                            confidence = bestScore,
+                            cx = cx,
+                            cy = cy,
+                            bw = bw,
+                            bh = bh
                         )
                     }
                 }
@@ -141,53 +129,139 @@ object YoloOutputDecoder {
             }
         }
 
-        val kept = NonMaxSuppression.applyClassWiseNms(candidates, iouThreshold = iouThreshold)
-        val detections = kept.map { cand ->
-            toDetectedDefect(cand, classLabels, transform)
+        if (originalSpaceCandidates.isEmpty()) {
+            return YoloDecodeResult.Success(emptyList())
         }
+
+        val kept = NonMaxSuppression.applyClassAgnosticNms(
+            candidates = originalSpaceCandidates,
+            iouThreshold = iouThreshold
+        )
+
+        val w0 = transform.originalWidth
+        val h0 = transform.originalHeight
+        val w0f = w0.toFloat()
+        val h0f = h0.toFloat()
+        val frameArea = max(1L, w0.toLong() * h0.toLong()).toDouble()
+        var cachedGreenBoard: Boolean? = null
+
+        val detections = mutableListOf<DetectedDefect>()
+        for (cand in kept) {
+            val boxWidthPx = (cand.x2Px - cand.x1Px).coerceAtLeast(0f).toDouble()
+            val boxHeightPx = (cand.y2Px - cand.y1Px).coerceAtLeast(0f).toDouble()
+            val areaPct = ((boxWidthPx * boxHeightPx) / frameArea) * 100.0
+            val touchesBorder = (
+                cand.x1Px <= BORDER_GUARD_MARGIN_PX ||
+                    cand.y1Px <= BORDER_GUARD_MARGIN_PX ||
+                    cand.x2Px >= (w0f - BORDER_GUARD_MARGIN_PX) ||
+                    cand.y2Px >= (h0f - BORDER_GUARD_MARGIN_PX)
+                )
+            if (touchesBorder && cand.confidence < BORDER_GUARD_MAX_CONF && areaPct < BORDER_GUARD_MAX_AREA_PCT) {
+                continue
+            }
+
+            val finalClassId = if (cand.classIndex == GreenPcbDefectRefiner.TARGET_SCRATCH_CLASS_ID && sourceBitmap != null) {
+                val isGreen = cachedGreenBoard ?: GreenPcbDefectRefiner.isGreenSolderMaskBoard(sourceBitmap).also {
+                    cachedGreenBoard = it
+                }
+                val (roiX1, roiY1, roiX2, roiY2) = toTruncatedRoiPixelBounds(cand, w0, h0)
+                GreenPcbDefectRefiner.refineClassId(
+                    bitmap = sourceBitmap,
+                    x1 = roiX1,
+                    y1 = roiY1,
+                    x2 = roiX2,
+                    y2 = roiY2,
+                    classId = cand.classIndex,
+                    knownGreenBoard = isGreen
+                )
+            } else {
+                cand.classIndex
+            }
+
+            val normalizedBox = BoundingBox(
+                x = cand.x1Px / w0f,
+                y = cand.y1Px / h0f,
+                width = (cand.x2Px - cand.x1Px) / w0f,
+                height = (cand.y2Px - cand.y1Px) / h0f
+            ).clamped()
+
+            detections.add(
+                toDetectedDefect(
+                    classIndex = finalClassId,
+                    confidence = cand.confidence,
+                    normalizedBox = normalizedBox,
+                    classLabels = classLabels
+                )
+            )
+        }
+
         return YoloDecodeResult.Success(detections)
     }
 
-    private fun decodeEmbeddedNmsRows(
-        flatData: FloatArray,
-        rowCount: Int,
-        classLabels: List<String>,
+    /**
+     * Converts clamped floating-point coordinates in [0..w0, 0..h0] to integer ROI bounds
+     * by truncating toward zero (`Float.toInt()`), matching Python `int(max(0, min(dim, coord)))`
+     * in `reference_python/vision_runtime.py`.
+     */
+    internal fun toTruncatedRoiPixelBounds(
+        cand: RawDetectionCandidate,
+        maxWidth: Int,
+        maxHeight: Int
+    ): IntArray {
+        val x1 = cand.x1Px.coerceIn(0f, maxWidth.toFloat()).toInt()
+        val y1 = cand.y1Px.coerceIn(0f, maxHeight.toFloat()).toInt()
+        val x2 = cand.x2Px.coerceIn(0f, maxWidth.toFloat()).toInt()
+        val y2 = cand.y2Px.coerceIn(0f, maxHeight.toFloat()).toInt()
+        return intArrayOf(x1, y1, x2, y2)
+    }
+
+    private fun addOriginalSpaceCandidate(
+        candidates: MutableList<RawDetectionCandidate>,
         transform: LetterboxTransform,
-        confidenceThreshold: Float
-    ): List<DetectedDefect> {
-        val result = mutableListOf<DetectedDefect>()
-        for (i in 0 until rowCount) {
-            val base = i * 6
-            val score = flatData[base + 4]
-            if (score < confidenceThreshold) continue
-            val classIdx = flatData[base + 5].toInt()
-            val candidate = RawDetectionCandidate(
-                classIndex = classIdx,
-                confidence = score.coerceIn(0f, 1f),
-                x1Px = flatData[base],
-                y1Px = flatData[base + 1],
-                x2Px = flatData[base + 2],
-                y2Px = flatData[base + 3]
+        classIndex: Int,
+        confidence: Float,
+        cx: Float,
+        cy: Float,
+        bw: Float,
+        bh: Float
+    ) {
+        if (!cx.isFinite() || !cy.isFinite() || !bw.isFinite() || !bh.isFinite()) return
+        if (bw <= 0f || bh <= 0f) return
+
+        val orig = transform.mapBoxToOriginalPixels(
+            x1InputPx = cx - bw / 2f,
+            y1InputPx = cy - bh / 2f,
+            x2InputPx = cx + bw / 2f,
+            y2InputPx = cy + bh / 2f
+        )
+        if (orig.x2 <= orig.x1 || orig.y2 <= orig.y1) return
+
+        candidates.add(
+            RawDetectionCandidate(
+                classIndex = classIndex,
+                confidence = confidence.coerceIn(0f, 1f),
+                x1Px = orig.x1,
+                y1Px = orig.y1,
+                x2Px = orig.x2,
+                y2Px = orig.y2
             )
-            result.add(toDetectedDefect(candidate, classLabels, transform))
-        }
-        return result
+        )
     }
 
     private fun toDetectedDefect(
-        candidate: RawDetectionCandidate,
-        classLabels: List<String>,
-        transform: LetterboxTransform
+        classIndex: Int,
+        confidence: Float,
+        normalizedBox: BoundingBox,
+        classLabels: List<String>
     ): DetectedDefect {
-        val rawLabel = classLabels.getOrElse(candidate.classIndex) { "unknown_class_${candidate.classIndex}" }
+        val rawLabel = classLabels.getOrElse(classIndex) { "unknown_class_$classIndex" }
         val taxonomy = DefectTaxonomy.resolve(rawLabel)
-        val normalizedBox = NonMaxSuppression.toNormalizedBoundingBox(candidate, transform)
         return DetectedDefect(
             defectId = "det-${UUID.randomUUID().toString().take(8)}",
-            classIndex = candidate.classIndex,
+            classIndex = classIndex,
             rawClassName = rawLabel,
             canonicalClassName = taxonomy.canonicalLabel,
-            confidence = candidate.confidence,
+            confidence = confidence,
             severity = taxonomy.defaultSeverity,
             requiresManualReview = taxonomy.requiresManualReview || !taxonomy.isKnownClass,
             boundingBox = normalizedBox,

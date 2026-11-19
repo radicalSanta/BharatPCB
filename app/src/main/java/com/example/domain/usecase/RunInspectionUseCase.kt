@@ -8,6 +8,7 @@ import com.example.domain.model.InspectionDisposition
 import com.example.domain.model.InspectionLatencyMetrics
 import com.example.domain.model.InspectionPolicyConfig
 import com.example.domain.model.InspectionRecord
+import com.example.domain.model.InspectionTarget
 import com.example.domain.model.ModelExecutionProvenance
 import com.example.domain.model.PcbImageInput
 import com.example.domain.model.PcbImageSource
@@ -16,6 +17,10 @@ import com.example.domain.repository.ImageStorageManager
 import com.example.domain.repository.InspectionCsvLogger
 import com.example.domain.repository.InspectionRepository
 import com.example.domain.repository.SettingsRepository
+import com.example.inference.cv.PatchCoreContractValidator
+import com.example.inference.cv.PatchCoreOutputDecoder
+import com.example.inference.cv.PatchCorePreprocessor
+import com.example.inference.cv.PatchCoreTransistorEngine
 import com.example.inference.cv.PcbDetectionEngine
 import com.example.inference.demo.DemoAdvisoryEngine
 import com.example.inference.demo.DemoPcbDetectionEngine
@@ -37,6 +42,7 @@ class RunInspectionUseCase(
     private val policyEngine: InspectionPolicyEngine,
     private val productionDetectionEngine: PcbDetectionEngine,
     private val demoDetectionEngine: DemoPcbDetectionEngine,
+    private val patchCoreEngine: PatchCoreTransistorEngine,
     private val productionAdvisoryEngine: AdvisoryEngine,
     private val demoAdvisoryEngine: DemoAdvisoryEngine,
     private val inspectionRepository: InspectionRepository,
@@ -51,12 +57,14 @@ class RunInspectionUseCase(
         sourceType: PcbImageSource,
         boardName: String,
         sampleScenarioHint: String? = null,
+        target: InspectionTarget = InspectionTarget.PCB_BOARD,
         onStageProgress: (String) -> Unit = {}
     ): InspectionRecord = withContext(defaultDispatcher) {
         val totalStartMs = System.currentTimeMillis()
         val policyConfig: InspectionPolicyConfig = settingsRepository.policyConfig.first()
 
-        onStageProgress("Validating PCB optical frame")
+        val opticalFrameLabel = if (target == InspectionTarget.TRANSISTOR) "transistor" else "PCB"
+        onStageProgress("Validating $opticalFrameLabel optical frame")
         val validation = imageStorageManager.validateAndAssessClarity(
             imageUriString = imageUriString,
             minWidth = policyConfig.minImageWidth,
@@ -66,14 +74,20 @@ class RunInspectionUseCase(
         val input = PcbImageInput(
             sourceUri = imageUriString,
             sourceType = sourceType,
-            boardName = boardName.ifBlank { "PCB Assembly" },
+            boardName = boardName.ifBlank {
+                if (target == InspectionTarget.TRANSISTOR) "Transistor Component" else "PCB Assembly"
+            },
             validation = validation,
             sampleScenarioHint = if (sourceType == PcbImageSource.SAMPLE) sampleScenarioHint else null
         )
 
         val isSampleDemo = sourceType == PcbImageSource.SAMPLE
         onStageProgress(
-            if (isSampleDemo) "Running demonstration PCB simulation" else "Running on-device YOLOv8n detection"
+            when {
+                isSampleDemo -> "Running demonstration PCB simulation"
+                target == InspectionTarget.TRANSISTOR -> "Running on-device PatchCore transistor anomaly detection"
+                else -> "Running on-device YOLOv8n detection"
+            }
         )
 
         val detectionOutcome: DetectionOutcome = if (!validation.isProcessable || !validation.isValid) {
@@ -92,16 +106,49 @@ class RunInspectionUseCase(
                         classMappingVersion = "pcb-11-v1",
                         runtimeVersion = "demo-1.0"
                     )
+                } else if (target == InspectionTarget.TRANSISTOR) {
+                    ModelExecutionProvenance(
+                        inferenceEngine = patchCoreEngine.engineLabel,
+                        modelIdentity = "NONE",
+                        modelSha256 = "NONE",
+                        modelContractVersion = PatchCoreContractValidator.CONTRACT_VERSION,
+                        preprocessingVersion = PatchCorePreprocessor.PREPROCESSING_VERSION,
+                        decoderVersion = PatchCoreOutputDecoder.DECODER_VERSION,
+                        classMappingVersion = "transistor-anomaly-v1",
+                        runtimeVersion = "ONNX Runtime Android 1.22.0"
+                    )
                 } else {
                     ModelExecutionProvenance.unavailableProduction("uninitialized")
                 }
             )
         } else if (isSampleDemo) {
-            // Sample presets explicitly execute through the demonstration engine
-            demoDetectionEngine.detect(input)
+            if (target == InspectionTarget.TRANSISTOR) {
+                // Transistor sample demonstration presets are not supported; SAMPLE must never reach production PatchCore
+                DetectionOutcome.Failure(
+                    errorType = DetectionErrorType.UNSUPPORTED_REAL_IMAGE_FALLBACK,
+                    errorMessage = "Transistor sample demonstration is not supported. Use Camera or Gallery with an imported PatchCore model.",
+                    latencyMetrics = InspectionLatencyMetrics(),
+                    provenance = ModelExecutionProvenance(
+                        inferenceEngine = "DemoTransistorUnsupported",
+                        modelIdentity = "NONE",
+                        modelSha256 = "NONE",
+                        modelContractVersion = "NONE",
+                        preprocessingVersion = "NONE",
+                        decoderVersion = "NONE",
+                        classMappingVersion = "NONE",
+                        runtimeVersion = "demo-1.0"
+                    )
+                )
+            } else {
+                // Sample presets explicitly execute through the demonstration engine
+                demoDetectionEngine.detect(input)
+            }
         } else {
-            // Real CAMERA/GALLERY inputs MUST use the production detector; never fall back to demo
-            productionDetectionEngine.detect(input)
+            // Real CAMERA/GALLERY inputs MUST route according to target; never fall back silently
+            when (target) {
+                InspectionTarget.PCB_BOARD -> productionDetectionEngine.detect(input)
+                InspectionTarget.TRANSISTOR -> patchCoreEngine.detect(input)
+            }
         }
 
         onStageProgress("Evaluating deterministic screening policy")
@@ -154,13 +201,15 @@ class RunInspectionUseCase(
         val combinedLatency = InspectionLatencyMetrics(
             imagePreprocessingMs = detectionOutcome.latencyMetrics.imagePreprocessingMs,
             yoloInferenceMs = detectionOutcome.latencyMetrics.yoloInferenceMs,
+            patchCoreInferenceMs = detectionOutcome.latencyMetrics.patchCoreInferenceMs,
             outputDecodingNmsMs = detectionOutcome.latencyMetrics.outputDecodingNmsMs,
             policyEvaluationMs = policyEvalMs,
             llmAdvisoryMs = advisoryLatencyMs,
             totalDurationMs = totalMs
         )
 
-        val inspectionId = generateInspectionId()
+        val inspectionId = generateInspectionId(target)
+        val transistorAnomaly = (detectionOutcome as? DetectionOutcome.Success)?.transistorAnomaly
         val record = InspectionRecord(
             inspectionId = inspectionId,
             timestampEpochMs = System.currentTimeMillis(),
@@ -182,7 +231,10 @@ class RunInspectionUseCase(
             isDemonstration = isSampleDemo,
             provenance = detectionOutcome.provenance,
             advisory = advisory,
-            latencyMetrics = combinedLatency
+            latencyMetrics = combinedLatency,
+            target = target,
+            transistorAnomaly = transistorAnomaly,
+            completedEpochMs = System.currentTimeMillis()
         )
 
         onStageProgress("Saving inspection record")
@@ -196,9 +248,10 @@ class RunInspectionUseCase(
         record
     }
 
-    private fun generateInspectionId(): String {
+    private fun generateInspectionId(target: InspectionTarget = InspectionTarget.PCB_BOARD): String {
         val stamp = SimpleDateFormat("yyyyMMdd-HHmmss", Locale.US).format(Date())
         val suffix = UUID.randomUUID().toString().take(4).uppercase(Locale.US)
-        return "PCB-$stamp-$suffix"
+        val prefix = if (target == InspectionTarget.TRANSISTOR) "TR" else "PCB"
+        return "$prefix-$stamp-$suffix"
     }
 }

@@ -214,24 +214,24 @@ class YoloPipelineTest {
     }
 
     @Test
-    fun `green PCB HSV refiner remaps scratch class 9 accurately and leaves non-green boards or other classes untouched`() {
-        // 1) Green board with charred dark ROI (V < 65 >= 16%) -> remaps 9 -> 5 (missing_copper)
+    fun `green PCB defect refinement preserves original class without HSV remapping`() {
+        // 1) Green board with charred dark ROI (previously remapped to 5) -> must retain class 9
         val greenWithChar = createGreenBoardBitmap(200, 200).apply {
             paintRect(40, 40, 100, 100, Color.rgb(30, 30, 30))
         }
-        assertEquals(5, GreenPcbDefectRefiner.refineClassId(greenWithChar, 40, 40, 100, 100, 9))
+        assertEquals(9, GreenPcbDefectRefiner.refineClassId(greenWithChar, 40, 40, 100, 100, 9))
 
-        // 2) Green board with bright metallic solder ROI (V > 165, S < 75 >= 25%) -> remaps 9 -> 1 (short)
+        // 2) Green board with bright metallic solder ROI (previously remapped to 1) -> must retain class 9
         val greenWithSolder = createGreenBoardBitmap(200, 200).apply {
             paintRect(40, 40, 100, 100, Color.rgb(210, 212, 215))
         }
-        assertEquals(1, GreenPcbDefectRefiner.refineClassId(greenWithSolder, 40, 40, 100, 100, 9))
+        assertEquals(9, GreenPcbDefectRefiner.refineClassId(greenWithSolder, 40, 40, 100, 100, 9))
 
         // 3) Green board with green/mild abrasion ROI -> stays 9 (scratch)
         val greenScratch = createGreenBoardBitmap(200, 200)
         assertEquals(9, GreenPcbDefectRefiner.refineClassId(greenScratch, 40, 40, 100, 100, 9))
 
-        // 4) Non-9 class on green board -> never remapped
+        // 4) Non-scratch class on green board -> never remapped
         assertEquals(2, GreenPcbDefectRefiner.refineClassId(greenWithChar, 40, 40, 100, 100, 2))
 
         // 5) Grayscale / amber non-green board with dark ROI -> stays 9
@@ -243,7 +243,40 @@ class YoloPipelineTest {
     }
 
     @Test
-    fun `decoder triggers HSV refinement on class 9 detections when green source bitmap is supplied`() {
+    fun `decoder preserves class 9 when supplied with green bitmap containing bright low-saturation pixels`() {
+        val labels = DefectTaxonomy.expectedDatasetLabelsByIndex
+        val numBoxes = 1
+        val data = FloatArray(15 * numBoxes)
+        data[0] = 320f
+        data[1] = 320f
+        data[2] = 128f
+        data[3] = 128f
+        data[4 + 9] = 0.72f // raw prediction: class 9 ("scratch")
+
+        // Green board with bright metallic solder ROI (V > 165, S < 75)
+        val greenWithSolder = createGreenBoardBitmap(640, 640).apply {
+            paintRect(256, 256, 384, 384, Color.rgb(210, 212, 215))
+        }
+        val transform = YoloPreprocessor.computeLetterboxTransform(640, 640, 640, 640)
+        val result = YoloOutputDecoder.decode(
+            flatData = data,
+            shape = longArrayOf(1L, 15L, 1L),
+            classLabels = labels,
+            transform = transform,
+            sourceBitmap = greenWithSolder
+        )
+
+        assertTrue(result is YoloDecodeResult.Success)
+        val detections = (result as YoloDecodeResult.Success).detections
+        assertEquals(1, detections.size)
+        assertEquals(9, detections[0].classIndex)
+        assertEquals("Scratch", detections[0].canonicalClassName)
+        assertEquals(0.72f, detections[0].confidence, 0.001f)
+        assertEquals(DefectSeverity.MANUAL_REVIEW, detections[0].severity)
+    }
+
+    @Test
+    fun `decoder preserves class 9 when supplied with green bitmap containing dark charred pixels`() {
         val labels = DefectTaxonomy.expectedDatasetLabelsByIndex
         val numBoxes = 1
         val data = FloatArray(15 * numBoxes)
@@ -268,9 +301,10 @@ class YoloPipelineTest {
         assertTrue(result is YoloDecodeResult.Success)
         val detections = (result as YoloDecodeResult.Success).detections
         assertEquals(1, detections.size)
-        assertEquals(5, detections[0].classIndex)
-        assertEquals("Missing Copper", detections[0].canonicalClassName)
-        assertEquals(DefectSeverity.CRITICAL, detections[0].severity)
+        assertEquals(9, detections[0].classIndex)
+        assertEquals("Scratch", detections[0].canonicalClassName)
+        assertEquals(0.72f, detections[0].confidence, 0.001f)
+        assertEquals(DefectSeverity.MANUAL_REVIEW, detections[0].severity)
     }
 
     @Test
@@ -490,19 +524,18 @@ class YoloPipelineTest {
         assertFalse(GreenPcbDefectRefiner.isGreenSolderMaskBoard(IntArray(100) { if (it < 14) greenPx else nonGreenPx }))
         assertTrue(GreenPcbDefectRefiner.isGreenSolderMaskBoard(IntArray(100) { if (it < 15) greenPx else nonGreenPx }))
 
-        // Char V < 65 at 16% cutoff (V=64 counts, V=65 does not)
+        // HSV remapping disabled: ROI pixel refinement retains class 9 across all pixel distributions
         val v64 = Color.rgb(64, 64, 64)
         val v65 = Color.rgb(65, 65, 65)
         assertEquals(9, GreenPcbDefectRefiner.refineRoiPixels(IntArray(100) { if (it < 15) v64 else v65 }, 9))
-        assertEquals(5, GreenPcbDefectRefiner.refineRoiPixels(IntArray(100) { if (it < 16) v64 else v65 }, 9))
+        assertEquals(9, GreenPcbDefectRefiner.refineRoiPixels(IntArray(100) { if (it < 16) v64 else v65 }, 9))
         assertEquals(9, GreenPcbDefectRefiner.refineRoiPixels(IntArray(100) { v65 }, 9))
 
-        // Solder V > 165 && S < 75 at 25% cutoff
         val solderOk = Color.rgb(142, 200, 142)     // V=200, S=74 (<75)
         val solderTooSat = Color.rgb(141, 200, 141) // V=200, S=75 (not <75)
         val solderTooDark = Color.rgb(165, 165, 165) // V=165 (not >165)
         assertEquals(9, GreenPcbDefectRefiner.refineRoiPixels(IntArray(100) { if (it < 24) solderOk else solderTooSat }, 9))
-        assertEquals(1, GreenPcbDefectRefiner.refineRoiPixels(IntArray(100) { if (it < 25) solderOk else solderTooSat }, 9))
+        assertEquals(9, GreenPcbDefectRefiner.refineRoiPixels(IntArray(100) { if (it < 25) solderOk else solderTooSat }, 9))
         assertEquals(9, GreenPcbDefectRefiner.refineRoiPixels(IntArray(100) { solderTooDark }, 9))
     }
 
@@ -643,12 +676,12 @@ class YoloPipelineTest {
     }
 
     @Test
-    fun `bitmap lifecycle keeps source bitmap unrecycled through preprocessing and HSV refinement`() {
+    fun `bitmap lifecycle keeps source bitmap unrecycled through preprocessing and decoding`() {
         val board = createGreenBoardBitmap(800, 600).apply {
             paintRect(200, 150, 400, 350, Color.rgb(20, 20, 20))
         }
         val tensorInput = YoloPreprocessor.prepareNchwFloatInput(board, 640, 640)
-        assertFalse("Preprocessing must never recycle source bitmap needed for HSV refinement", board.isRecycled)
+        assertFalse("Preprocessing must never recycle source bitmap", board.isRecycled)
 
         val numBoxes = 1
         val data = FloatArray(15 * numBoxes).apply {
@@ -666,7 +699,9 @@ class YoloPipelineTest {
             sourceBitmap = board
         )
         assertTrue(decoded is YoloDecodeResult.Success)
-        assertEquals(5, (decoded as YoloDecodeResult.Success).detections.single().classIndex)
+        val singleDet = (decoded as YoloDecodeResult.Success).detections.single()
+        assertEquals(9, singleDet.classIndex)
+        assertEquals("Scratch", singleDet.canonicalClassName)
         assertFalse("Decoder must not recycle caller-owned source bitmap", board.isRecycled)
     }
 

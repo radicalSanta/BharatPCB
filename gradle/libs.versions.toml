@@ -1,5 +1,5 @@
 [versions]
-agp = "9.1.1"
+agp = "9.5.1"
 coreKtx = "1.18.0"
 junit = "4.13.2"
 junitVersion = "1.3.0"
@@ -43,7 +43,9 @@ googleid = "1.1.1"
 kotlinxSerializationJson = "1.8.0"
 exifinterface = "1.4.0"
 onnxruntimeAndroid = "1.22.0"
-executorchAndroid = "1.0.1"
+executorchAndroid = "1.6.0"
+fbjni = "0.7.0"
+nativeloader = "0.10.5"
 
 
 [libraries]
@@ -82,6 +84,8 @@ kotlinx-serialization-json = { group = "org.jetbrains.kotlinx", name = "kotlinx-
 androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
 onnxruntime-android = { group = "com.microsoft.onnxruntime", name = "onnxruntime-android", version.ref = "onnxruntimeAndroid" }
 executorch-android = { group = "org.pytorch", name = "executorch-android", version.ref = "executorchAndroid" }
+fbjni = { group = "com.facebook.fbjni", name = "fbjni", version.ref = "fbjni" }
+nativeloader = { group = "com.facebook.soloader", name = "nativeloader", version.ref = "nativeloader" }
 accompanist-permissions = { group = "com.google.accompanist", name = "accompanist-permissions", version.ref = "accompanistPermissions" }
 play-services-location = { group = "com.google.android.gms", name = "play-services-location", version.ref = "playServicesLocation" }
 androidx-camera-camera2 = { group = "androidx.camera", name = "camera-camera2", version.ref = "cameraCamera2" }

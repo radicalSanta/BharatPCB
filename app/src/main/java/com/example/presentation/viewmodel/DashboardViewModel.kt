@@ -25,11 +25,13 @@ data class DashboardUiState(
     val metrics: DashboardMetrics = DashboardMetrics(),
     val detectionModelInfo: ModelInfo,
     val advisoryModelInfo: ModelInfo,
+    val transistorModelInfo: ModelInfo,
     val isLoaded: Boolean = false
 ) {
     val hasRuntimeAlert: Boolean
         get() = detectionModelInfo.state != ModelRuntimeState.READY ||
-            advisoryModelInfo.state != ModelRuntimeState.READY
+            advisoryModelInfo.state != ModelRuntimeState.READY ||
+            transistorModelInfo.state != ModelRuntimeState.READY
 }
 
 class DashboardViewModel(
@@ -52,8 +54,9 @@ class DashboardViewModel(
         inspectionRepository.observeAllRecords(),
         filterParams,
         modelManager.detectionModelInfo,
-        modelManager.advisoryModelInfo
-    ) { records, (period, window, metric), detInfo, advInfo ->
+        modelManager.advisoryModelInfo,
+        modelManager.transistorModelInfo
+    ) { records, (period, window, metric), detInfo, advInfo, transInfo ->
         val metrics = computeDashboardMetricsUseCase.compute(
             allRecords = records,
             period = period,
@@ -66,6 +69,7 @@ class DashboardViewModel(
             metrics = metrics,
             detectionModelInfo = detInfo,
             advisoryModelInfo = advInfo,
+            transistorModelInfo = transInfo,
             isLoaded = true
         )
     }.stateIn(
@@ -73,7 +77,8 @@ class DashboardViewModel(
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = DashboardUiState(
             detectionModelInfo = modelManager.detectionModelInfo.value,
-            advisoryModelInfo = modelManager.advisoryModelInfo.value
+            advisoryModelInfo = modelManager.advisoryModelInfo.value,
+            transistorModelInfo = modelManager.transistorModelInfo.value
         )
     )
 

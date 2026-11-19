@@ -45,7 +45,8 @@ data class HistoryUiState(
 class HistoryViewModel(
     private val inspectionRepository: InspectionRepository,
     private val csvExportManager: CsvExportManager,
-    private val storageAccessManager: StorageAccessManager
+    private val storageAccessManager: StorageAccessManager,
+    initialDisposition: String? = null
 ) : ViewModel() {
 
     private data class FilterState(
@@ -55,7 +56,11 @@ class HistoryViewModel(
         val statusMessage: String? = null
     )
 
-    private val _filterState = MutableStateFlow(FilterState())
+    private val resolvedInitialFilter = initialDisposition?.let {
+        runCatching { HistoryDispositionFilter.valueOf(it) }.getOrNull()
+    } ?: HistoryDispositionFilter.ALL
+
+    private val _filterState = MutableStateFlow(FilterState(dispositionFilter = resolvedInitialFilter))
     private var latestAllRecords: List<InspectionRecord> = emptyList()
     private var pendingSafCsvContent: String = ""
 
@@ -81,7 +86,7 @@ class HistoryViewModel(
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),
-        initialValue = HistoryUiState()
+        initialValue = HistoryUiState(dispositionFilter = resolvedInitialFilter)
     )
 
     fun onSearchQueryChanged(query: String) {
@@ -213,14 +218,16 @@ class HistoryViewModel(
     class Factory(
         private val inspectionRepository: InspectionRepository,
         private val csvExportManager: CsvExportManager,
-        private val storageAccessManager: StorageAccessManager
+        private val storageAccessManager: StorageAccessManager,
+        private val initialDisposition: String? = null
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             return HistoryViewModel(
                 inspectionRepository = inspectionRepository,
                 csvExportManager = csvExportManager,
-                storageAccessManager = storageAccessManager
+                storageAccessManager = storageAccessManager,
+                initialDisposition = initialDisposition
             ) as T
         }
     }

@@ -191,4 +191,90 @@ class InspectionPolicyEngineTest {
         assertEquals("2.1.0-screening", result.policyVersion)
         assertEquals(customConfig, result.configSnapshot)
     }
+
+    @Test
+    fun `anomalous transistor result produces REVIEW disposition and requires manual review`() {
+        val transistorDefect = DetectedDefect(
+            defectId = "tr-1",
+            classIndex = 0,
+            rawClassName = "transistor_anomaly",
+            canonicalClassName = "transistor_anomaly",
+            confidence = 0.88f,
+            severity = DefectSeverity.LOW, // claimed severity will be overridden by taxonomy
+            requiresManualReview = false,
+            boundingBox = null // Null bounding box
+        )
+
+        val result = engine.evaluate(validImage(), outcomeOf(transistorDefect), defaultConfig)
+        assertEquals(InspectionDisposition.REVIEW, result.officialDisposition)
+        assertEquals(1, result.evaluatedDefects.size)
+        val evaluated = result.evaluatedDefects.single()
+        assertEquals("Transistor Anomaly", evaluated.canonicalClassName)
+        assertEquals(DefectSeverity.MANUAL_REVIEW, evaluated.severity)
+        assertTrue(evaluated.requiresManualReview)
+        org.junit.Assert.assertNull("Null bounding box must be safely preserved", evaluated.boundingBox)
+        assertEquals("TR-ANOMALY-REVIEW", evaluated.code)
+    }
+
+    @Test
+    fun `non-anomalous transistor result with zero defects yields PASS under screening profile`() {
+        val result = engine.evaluate(validImage(lowClarity = false), outcomeOf(), defaultConfig)
+        assertEquals(InspectionDisposition.PASS, result.officialDisposition)
+        assertEquals(0, result.evaluatedDefects.size)
+    }
+
+    @Test
+    fun `policy evaluates 226x226 and 224x224 images as PASS when zero defects detected`() {
+        val img226 = ImageValidationResult(
+            isValid = true,
+            isProcessable = true,
+            width = 226,
+            height = 226,
+            clarityScore = 150.0,
+            lowClarityRisk = false,
+            orientationDegrees = 0
+        )
+        val result226 = engine.evaluate(img226, outcomeOf(), defaultConfig)
+        assertEquals(InspectionDisposition.PASS, result226.officialDisposition)
+
+        val img224 = ImageValidationResult(
+            isValid = true,
+            isProcessable = true,
+            width = 224,
+            height = 224,
+            clarityScore = 150.0,
+            lowClarityRisk = false,
+            orientationDegrees = 0
+        )
+        val result224 = engine.evaluate(img224, outcomeOf(), defaultConfig)
+        assertEquals(InspectionDisposition.PASS, result224.officialDisposition)
+    }
+
+    @Test
+    fun `policy evaluates images below 224 in either dimension as INCOMPLETE`() {
+        val img223 = ImageValidationResult(
+            isValid = true,
+            isProcessable = true,
+            width = 223,
+            height = 223,
+            clarityScore = 150.0,
+            lowClarityRisk = false,
+            orientationDegrees = 0
+        )
+        val result223 = engine.evaluate(img223, outcomeOf(), defaultConfig)
+        assertEquals(InspectionDisposition.INCOMPLETE, result223.officialDisposition)
+        assertTrue(result223.rationale.contains("below minimum dimensions"))
+
+        val imgAsymmetric = ImageValidationResult(
+            isValid = true,
+            isProcessable = true,
+            width = 300,
+            height = 220,
+            clarityScore = 150.0,
+            lowClarityRisk = false,
+            orientationDegrees = 0
+        )
+        val resultAsymmetric = engine.evaluate(imgAsymmetric, outcomeOf(), defaultConfig)
+        assertEquals(InspectionDisposition.INCOMPLETE, resultAsymmetric.officialDisposition)
+    }
 }

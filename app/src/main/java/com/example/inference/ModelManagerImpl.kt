@@ -9,6 +9,7 @@ import com.example.domain.model.ModelSlot
 import com.example.domain.repository.ModelManager
 import com.example.inference.cv.ModelOperationResult
 import com.example.inference.cv.OnnxPcbDetectionEngine
+import com.example.inference.cv.PatchCoreTransistorEngine
 import com.example.inference.llm.ExecuTorchAdvisoryEngine
 import java.io.File
 import java.io.FileOutputStream
@@ -28,11 +29,13 @@ class ModelManagerImpl(
     private val settingsRepository: SettingsRepositoryImpl,
     private val onnxEngine: OnnxPcbDetectionEngine,
     private val execuTorchEngine: ExecuTorchAdvisoryEngine,
+    private val patchCoreEngine: PatchCoreTransistorEngine,
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
 ) : ModelManager {
 
     override val detectionModelInfo: StateFlow<ModelInfo> = onnxEngine.modelInfo
     override val advisoryModelInfo: StateFlow<ModelInfo> = execuTorchEngine.modelInfo
+    override val transistorModelInfo: StateFlow<ModelInfo> = patchCoreEngine.modelInfo
 
     private val modelsDir: File
         get() = File(context.filesDir, "models").apply { mkdirs() }
@@ -105,7 +108,7 @@ class ModelManagerImpl(
 
     override suspend fun importAdvisoryModel(sourceUri: Uri): ModelOperationResult =
         withContext(ioDispatcher) {
-            val displayName = resolveDisplayName(sourceUri) ?: "llama_3_2_1b.pte"
+            val displayName = resolveDisplayName(sourceUri) ?: "smollm2_360m.pte"
             if (!displayName.endsWith(".pte", ignoreCase = true)) {
                 return@withContext ModelOperationResult(
                     false,
@@ -115,7 +118,7 @@ class ModelManagerImpl(
             val stagedFile = File(stagingDir, "stage_${UUID.randomUUID()}.pte")
             try {
                 copyUriToFile(sourceUri, stagedFile)
-                val targetFile = File(modelsDir, "active_llama_advisory.pte")
+                val targetFile = File(modelsDir, "active_smollm2_advisory.pte")
                 stagedFile.copyTo(targetFile, overwrite = true)
                 settingsRepository.setAdvisoryModelPath(targetFile.absolutePath)
 
@@ -136,21 +139,37 @@ class ModelManagerImpl(
 
     override suspend fun importAdvisoryTokenizer(sourceUri: Uri): ModelOperationResult =
         withContext(ioDispatcher) {
-            val displayName = resolveDisplayName(sourceUri) ?: "tokenizer.bin"
+            val displayName = resolveDisplayName(sourceUri) ?: "tokenizer.json"
             val lower = displayName.lowercase()
             if (!lower.endsWith(".bin") && !lower.endsWith(".model") && !lower.endsWith(".json")) {
                 return@withContext ModelOperationResult(
                     false,
-                    "Invalid tokenizer '$displayName': expected .bin, .model, or .json."
+                    "Invalid tokenizer '$displayName': expected .json, .bin, or .model."
                 )
             }
             val stagedFile = File(stagingDir, "stage_tok_${UUID.randomUUID()}_$displayName")
             try {
                 copyUriToFile(sourceUri, stagedFile)
-                val ext = displayName.substringAfterLast('.', "bin")
+                val ext = displayName.substringAfterLast('.', "json")
                 val targetFile = File(modelsDir, "active_tokenizer.$ext")
                 stagedFile.copyTo(targetFile, overwrite = true)
                 settingsRepository.setAdvisoryTokenizerPath(targetFile.absolutePath)
+
+                // Stage auxiliary tokenizer config/special-tokens files if available alongside source
+                if (sourceUri.scheme == "file" || sourceUri.scheme == null) {
+                    val sourcePath = sourceUri.path
+                    if (sourcePath != null) {
+                        val parentDir = File(sourcePath).parentFile
+                        if (parentDir != null && parentDir.exists()) {
+                            listOf("special_tokens_map.json", "tokenizer_config.json").forEach { auxName ->
+                                val auxSrc = File(parentDir, auxName)
+                                if (auxSrc.exists()) {
+                                    auxSrc.copyTo(File(modelsDir, auxName), overwrite = true)
+                                }
+                            }
+                        }
+                    }
+                }
 
                 val artifacts = settingsRepository.storedModelArtifacts.first()
                 val modelFile = artifacts.advisoryModelPath?.let(::File)
@@ -182,10 +201,74 @@ class ModelManagerImpl(
         return ModelOperationResult(true, "ExecuTorch advisory session unloaded.")
     }
 
+    override suspend fun importTransistorModel(sourceUri: Uri): ModelOperationResult =
+        withContext(ioDispatcher) {
+            val displayName = resolveDisplayName(sourceUri) ?: "patchcore_transistor_single.onnx"
+            if (!displayName.endsWith(".onnx", ignoreCase = true)) {
+                return@withContext ModelOperationResult(
+                    false,
+                    "Invalid file '$displayName': expected a .onnx PatchCore artifact."
+                )
+            }
+
+            val stagedFile = File(stagingDir, "stage_transistor_${UUID.randomUUID()}.onnx")
+            try {
+                copyUriToFile(sourceUri, stagedFile)
+                val validation = patchCoreEngine.validateAndStageCandidate(stagedFile)
+                if (validation.isFailure) {
+                    return@withContext ModelOperationResult(
+                        false,
+                        "PatchCore ONNX validation failed (previous model preserved): ${validation.exceptionOrNull()?.message}"
+                    )
+                }
+
+                val targetFile = File(modelsDir, "active_transistor_patchcore.onnx")
+                val backupFile = File(modelsDir, "backup_transistor_patchcore.onnx")
+                if (targetFile.exists()) {
+                    targetFile.copyTo(backupFile, overwrite = true)
+                }
+
+                check(stagedFile.copyTo(targetFile, overwrite = true).length() > 0L) {
+                    "Failed to promote staged PatchCore ONNX file."
+                }
+                val loadResult = patchCoreEngine.loadFromModelFile(targetFile)
+                if (!loadResult.success) {
+                    if (backupFile.exists()) {
+                        backupFile.copyTo(targetFile, overwrite = true)
+                        patchCoreEngine.loadFromModelFile(targetFile)
+                    }
+                    return@withContext loadResult
+                }
+
+                backupFile.delete()
+                settingsRepository.setTransistorModelPath(targetFile.absolutePath)
+                loadResult
+            } catch (e: Throwable) {
+                ModelOperationResult(false, "PatchCore import failed: ${e.message ?: "unknown error"}")
+            } finally {
+                stagedFile.delete()
+            }
+        }
+
+    override suspend fun loadTransistorModel(): ModelOperationResult {
+        val artifacts = settingsRepository.storedModelArtifacts.first()
+        val path = artifacts.transistorModelPath ?: return ModelOperationResult(
+            false,
+            "No imported PatchCore model found. Import patchcore_transistor_single.onnx first."
+        )
+        return patchCoreEngine.loadFromModelFile(File(path))
+    }
+
+    override suspend fun unloadTransistorModel(): ModelOperationResult {
+        patchCoreEngine.unload()
+        return ModelOperationResult(true, "PatchCore transistor session unloaded.")
+    }
+
     override fun inspectModelMetadata(slot: ModelSlot): String {
         return when (slot) {
             ModelSlot.PCB_DETECTION -> onnxEngine.inspectCurrentMetadataText()
             ModelSlot.AI_ADVISORY -> execuTorchEngine.inspectCurrentMetadataText()
+            ModelSlot.TRANSISTOR_ANOMALY -> patchCoreEngine.inspectCurrentMetadataText()
         }
     }
 

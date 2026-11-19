@@ -13,10 +13,12 @@ import com.example.data.repository.InspectionRepositoryImpl
 import com.example.domain.model.AdvisoryAvailability
 import com.example.domain.model.InspectionDisposition
 import com.example.domain.model.InspectionPolicyConfig
+import com.example.domain.model.InspectionTarget
 import com.example.domain.model.PcbImageSource
 import com.example.domain.policy.InspectionPolicyEngine
 import com.example.domain.repository.SettingsRepository
 import com.example.inference.cv.OnnxPcbDetectionEngine
+import com.example.inference.cv.PatchCoreTransistorEngine
 import com.example.inference.demo.DemoAdvisoryEngine
 import com.example.inference.demo.DemoPcbDetectionEngine
 import com.example.inference.demo.SamplePcbCatalog
@@ -80,6 +82,7 @@ class RunInspectionUseCaseTest {
             policyEngine = InspectionPolicyEngine(),
             productionDetectionEngine = OnnxPcbDetectionEngine(context, Dispatchers.Unconfined),
             demoDetectionEngine = DemoPcbDetectionEngine(),
+            patchCoreEngine = PatchCoreTransistorEngine(context, Dispatchers.Unconfined),
             productionAdvisoryEngine = ExecuTorchAdvisoryEngine(Dispatchers.Unconfined),
             demoAdvisoryEngine = DemoAdvisoryEngine(),
             inspectionRepository = repository,
@@ -152,6 +155,96 @@ class RunInspectionUseCaseTest {
         assertEquals(InspectionDisposition.INCOMPLETE, record.officialDisposition)
         assertFalse(record.isDemonstration)
         assertTrue(record.defects.isEmpty())
+    }
+
+    @Test
+    fun realTransistorImageRoutesToPatchCoreAndReportsIncompleteWhenUnloadedWithoutFallingBackToYoloOrDemo() = runBlocking {
+        val sharpPng = createTexturedPng("real_transistor_test.png", 640, 480)
+        val record = useCase.execute(
+            imageUriString = Uri.fromFile(sharpPng).toString(),
+            sourceType = PcbImageSource.GALLERY,
+            boardName = "Transistor Unit 101",
+            target = InspectionTarget.TRANSISTOR
+        )
+
+        assertEquals(InspectionTarget.TRANSISTOR, record.target)
+        assertEquals(InspectionDisposition.INCOMPLETE, record.officialDisposition)
+        assertFalse(record.isDemonstration)
+        assertTrue(record.defects.isEmpty())
+        assertEquals("PatchCoreTransistorEngine", record.provenance.inferenceEngine)
+        assertEquals("NONE", record.provenance.modelSha256)
+        assertTrue(record.inspectionId.startsWith("TR-"))
+        assertTrue(record.completedEpochMs != null)
+
+        val stored = repository.getRecordById(record.inspectionId)
+        assertEquals(InspectionTarget.TRANSISTOR, stored?.target)
+        assertEquals(InspectionDisposition.INCOMPLETE, stored?.officialDisposition)
+    }
+
+    @Test
+    fun sampleTransistorInputExplicitlyRejectsSampleDemoSimulation() = runBlocking {
+        val sharpPng = createTexturedPng("sample_transistor_attempt.png", 640, 480)
+        val record = useCase.execute(
+            imageUriString = Uri.fromFile(sharpPng).toString(),
+            sourceType = PcbImageSource.SAMPLE,
+            boardName = "Sample Transistor",
+            target = InspectionTarget.TRANSISTOR
+        )
+
+        assertEquals(InspectionTarget.TRANSISTOR, record.target)
+        assertEquals(InspectionDisposition.INCOMPLETE, record.officialDisposition)
+        assertTrue(record.policyRationale.contains("UNSUPPORTED_REAL_IMAGE_FALLBACK"))
+        assertEquals("DemoTransistorUnsupported", record.provenance.inferenceEngine)
+    }
+
+    @Test
+    fun executeAccepts226x226ImageForBothPcbAndTransistorModes() = runBlocking {
+        val img226 = createTexturedPng("valid_226x226_frame.png", 226, 226)
+
+        // 1. PCB mode: 226x226 is accepted and proceeds past optical frame validation
+        val pcbRecord = useCase.execute(
+            imageUriString = Uri.fromFile(img226).toString(),
+            sourceType = PcbImageSource.GALLERY,
+            boardName = "PCB-226-Test",
+            target = InspectionTarget.PCB_BOARD
+        )
+        assertFalse(pcbRecord.policyRationale.contains("UNPROCESSABLE_IMAGE"))
+        assertEquals(226, pcbRecord.imageWidth)
+        assertEquals(226, pcbRecord.imageHeight)
+
+        // 2. Transistor mode: 226x226 is accepted and proceeds past optical frame validation
+        val trRecord = useCase.execute(
+            imageUriString = Uri.fromFile(img226).toString(),
+            sourceType = PcbImageSource.GALLERY,
+            boardName = "TR-226-Test",
+            target = InspectionTarget.TRANSISTOR
+        )
+        assertFalse(trRecord.policyRationale.contains("UNPROCESSABLE_IMAGE"))
+        assertEquals(226, trRecord.imageWidth)
+        assertEquals(226, trRecord.imageHeight)
+    }
+
+    @Test
+    fun executeRejects223x223ImageAsUnprocessableForBothModes() = runBlocking {
+        val img223 = createTexturedPng("subscale_223x223_frame.png", 223, 223)
+
+        val pcbRecord = useCase.execute(
+            imageUriString = Uri.fromFile(img223).toString(),
+            sourceType = PcbImageSource.GALLERY,
+            boardName = "PCB-223-Test",
+            target = InspectionTarget.PCB_BOARD
+        )
+        assertEquals(InspectionDisposition.INCOMPLETE, pcbRecord.officialDisposition)
+        assertTrue(pcbRecord.policyRationale.contains("below minimum"))
+
+        val trRecord = useCase.execute(
+            imageUriString = Uri.fromFile(img223).toString(),
+            sourceType = PcbImageSource.GALLERY,
+            boardName = "TR-223-Test",
+            target = InspectionTarget.TRANSISTOR
+        )
+        assertEquals(InspectionDisposition.INCOMPLETE, trRecord.officialDisposition)
+        assertTrue(trRecord.policyRationale.contains("below minimum"))
     }
 
     private fun createTexturedPng(name: String, width: Int, height: Int): File {

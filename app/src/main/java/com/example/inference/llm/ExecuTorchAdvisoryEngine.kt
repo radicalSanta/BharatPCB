@@ -8,7 +8,9 @@ import com.example.domain.model.ModelSlot
 import com.example.inference.cv.ModelOperationResult
 import java.io.File
 import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -19,10 +21,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.pytorch.executorch.extension.llm.LlmCallback
+import org.pytorch.executorch.extension.llm.LlmGenerationConfig
 import org.pytorch.executorch.extension.llm.LlmModule
 
 /**
- * Production on-device Llama 3.2 1B Instruct advisory engine via ExecuTorch Android.
+ * Production on-device SmolLM2 360M Instruct advisory engine via ExecuTorch Android 1.6.0.
  *
  * Remains NOT_LOADED until compatible `.pte` and tokenizer files are imported and loaded.
  * Advisory generation is strictly read-only/explanatory and never alters policy dispositions.
@@ -31,15 +34,26 @@ class ExecuTorchAdvisoryEngine(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.Default
 ) : AdvisoryEngine {
 
-    override val engineLabel: String = "ExecuTorchAdvisoryEngine (Llama 3.2 1B Instruct)"
+    override val engineLabel: String = "ExecuTorchAdvisoryEngine (SmolLM2 360M Instruct)"
     override val isDemonstrationEngine: Boolean = false
 
     private val inferenceMutex = Mutex()
     private var llmModule: LlmModule? = null
+    private var smolLm2Tokenizer: SmolLm2Tokenizer? = null
     private var activeModelPath: String? = null
     private var activeTokenizerPath: String? = null
     private var activeSha256: String? = null
     private val isGenerating = AtomicBoolean(false)
+    private val isCancelled = AtomicBoolean(false)
+    private val invocationCounter = AtomicLong(0L)
+
+    var latestProfilingMetrics: AdvisoryProfilingMetrics = AdvisoryProfilingMetrics()
+        private set
+    var latestRawOutput: String? = null
+        private set
+    var latestCallbackCount: Int = 0
+        private set
+    var debugOutputDir: File? = null
 
     private val _modelInfo = MutableStateFlow(initialNotLoadedInfo())
     override val modelInfo: StateFlow<ModelInfo> = _modelInfo.asStateFlow()
@@ -62,7 +76,7 @@ class ExecuTorchAdvisoryEngine(
             if (llmModule == null) {
                 val detail = when {
                     mPath == null && tPath == null ->
-                        "Not loaded. Import Llama 3.2 1B .pte and tokenizer files in Settings."
+                        "Not loaded. Import SmolLM2 360M .pte and tokenizer files in Settings."
                     mPath == null ->
                         "Tokenizer staged (${File(tPath!!).name}); awaiting .pte model file."
                     tPath == null ->
@@ -87,6 +101,8 @@ class ExecuTorchAdvisoryEngine(
                     state = ModelRuntimeState.LOADING,
                     detailMessage = "Validating .pte + tokenizer and loading ExecuTorch runtime..."
                 )
+                val baselineRss = MemoryProfiler.getProcessRssMb()
+                val loadStartMs = System.currentTimeMillis()
                 try {
                     require(modelFile.exists() && modelFile.canRead() && modelFile.length() > 0L) {
                         "ExecuTorch .pte file is missing or unreadable."
@@ -96,28 +112,49 @@ class ExecuTorchAdvisoryEngine(
                     }
                     validateArtifactExtensions(modelFile, tokenizerFile)
 
+                    val tokenizer = if (tokenizerFile.name.endsWith(".json", ignoreCase = true)) {
+                        runCatching { SmolLm2Tokenizer.load(tokenizerFile) }.getOrNull()
+                    } else {
+                        null
+                    }
+
                     val sha256 = computeSha256(modelFile)
                     val module = LlmModule(
                         modelFile.absolutePath,
                         tokenizerFile.absolutePath,
                         0.2f
                     )
-                    val loadStatus = module.load()
-                    if (loadStatus != 0) {
-                        runCatching { module.resetNative() }
-                        error("ExecuTorch LlmModule.load() returned status code $loadStatus.")
+                    try {
+                        module.load()
+                    } catch (loadErr: Throwable) {
+                        runCatching { module.close() }
+                        throw loadErr
                     }
 
                     // Release any prior loaded module only after replacement succeeds
-                    runCatching { llmModule?.resetNative() }
+                    runCatching { llmModule?.resetContext() }
+                    runCatching { llmModule?.close() }
                     llmModule = module
+                    smolLm2Tokenizer = tokenizer
                     activeModelPath = modelFile.absolutePath
                     activeTokenizerPath = tokenizerFile.absolutePath
                     activeSha256 = sha256
 
+                    val loadLatency = (System.currentTimeMillis() - loadStartMs).coerceAtLeast(1L)
+                    val loadedRss = MemoryProfiler.getProcessRssMb()
+                    latestProfilingMetrics = latestProfilingMetrics.copy(
+                        baselineRssMb = baselineRss,
+                        loadedRssMb = loadedRss,
+                        loadLatencyMs = loadLatency
+                    )
+                    SafeLog.i(
+                        TAG,
+                        "SmolLM2 360M loaded in ${loadLatency}ms. RSS: baseline=${"%.2f".format(baselineRss)}MB, loaded=${"%.2f".format(loadedRss)}MB"
+                    )
+
                     _modelInfo.value = ModelInfo(
                         slot = ModelSlot.AI_ADVISORY,
-                        displayName = "Llama 3.2 1B Instruct (${modelFile.name})",
+                        displayName = "SmolLM2 360M Instruct (${modelFile.name})",
                         runtimeLabel = "ExecuTorch Android $EXECUTORCH_RUNTIME_VERSION",
                         state = ModelRuntimeState.READY,
                         artifactPath = modelFile.absolutePath,
@@ -130,6 +167,7 @@ class ExecuTorchAdvisoryEngine(
                     )
                     ModelOperationResult(true, "ExecuTorch LLM runtime initialized.")
                 } catch (e: Throwable) {
+                    SafeLog.e(TAG, "ExecuTorch load failed: ${e.message}", e)
                     if (llmModule == null) {
                         _modelInfo.value = _modelInfo.value.copy(
                             state = ModelRuntimeState.ERROR,
@@ -151,59 +189,310 @@ class ExecuTorchAdvisoryEngine(
                     return@withContext AiAdvisory(
                         availability = AdvisoryAvailability.UNAVAILABLE,
                         isDemonstration = false,
-                        unavailableReason = "ExecuTorch LLM is ${_modelInfo.value.state.name}. Import and load Llama 3.2 1B .pte + tokenizer in Settings.",
+                        unavailableReason = "ExecuTorch LLM is ${_modelInfo.value.state.name}. Import and load SmolLM2 360M .pte + tokenizer in Settings.",
                         provenanceSummary = currentProvenanceSummary()
                     )
                 }
 
-                val startMs = System.currentTimeMillis()
-                val prompt = AdvisoryPromptBuilder.buildGroundedPrompt(request)
-                val outputBuffer = StringBuilder()
+                val invocationId = invocationCounter.incrementAndGet()
+                val moduleIdentity = System.identityHashCode(module).toString(16)
+                SafeLog.i(
+                    TAG,
+                    "[$invocationId] Starting generation: inspection='${request.inspectionId}', module=@$moduleIdentity"
+                )
 
+                // Cleanly reset KV-cache state before generation to prevent stale position accumulation
+                SafeLog.i(TAG, "[$invocationId] Resetting KV-cache context via module.resetContext() before inference.")
+                runCatching { module.resetContext() }.onFailure { err ->
+                    SafeLog.w(TAG, "[$invocationId] Pre-generation resetContext warning: ${err.message}")
+                }
+
+                val prompt = AdvisoryPromptBuilder.buildGroundedPrompt(request)
+                val tokenizer = getOrLoadTokenizer()
+                val promptTokenIds = tokenizer?.encode(prompt) ?: emptyList()
+                val promptTokens = if (promptTokenIds.isNotEmpty()) promptTokenIds.size else (prompt.length / 3).coerceAtLeast(1)
+
+                val budget = GenerationBudgeter.calculate(
+                    promptTokens = promptTokens,
+                    maxContextLen = MAX_CONTEXT_LEN,
+                    maxNewTokens = MAX_NEW_TOKENS
+                )
+
+                SafeLog.i(
+                    TAG,
+                    "[$invocationId] Parameters: promptTokens=$promptTokens, newTokensBudget=${budget.newTokensBudget}, " +
+                    "totalSeqLen=${budget.totalSeqLen}, maxContext=$MAX_CONTEXT_LEN"
+                )
+
+                if (!budget.isExecutable) {
+                    SafeLog.w(TAG, "[$invocationId] Generation budget rejected: ${budget.rejectionReason}")
+                    return@withContext AiAdvisory(
+                        availability = AdvisoryAvailability.UNAVAILABLE,
+                        isDemonstration = false,
+                        unavailableReason = "Advisory unavailable: ${budget.rejectionReason}",
+                        provenanceSummary = currentProvenanceSummary()
+                    )
+                }
+
+                val genConfig = LlmGenerationConfig.create()
+                    .seqLen(budget.totalSeqLen)
+                    .maxNewTokens(budget.newTokensBudget)
+                    .temperature(0.2f)
+                    .echo(false)
+                    .build()
+
+                val startGenMs = System.currentTimeMillis()
+                var firstTokenMs = 0L
+                val startRss = MemoryProfiler.getProcessRssMb()
+                var peakRss = startRss
+                val outputBuffer = StringBuilder()
+                var callbackCount = 0
+                var callbackErrorCode: Int? = null
+                var callbackErrorMessage: String? = null
+                val callbackTrace = mutableListOf<String>()
+                val inferredTokenIds = mutableListOf<Int>()
+
+                isCancelled.set(false)
                 isGenerating.set(true)
                 try {
                     module.generate(
                         prompt,
-                        MAX_OUTPUT_SEQ_LEN,
+                        genConfig,
                         object : LlmCallback {
                             override fun onResult(result: String) {
-                                if (outputBuffer.length < 4096) {
+                                callbackCount++
+                                if (firstTokenMs == 0L) {
+                                    firstTokenMs = System.currentTimeMillis()
+                                }
+                                if (outputBuffer.length < MAX_RAW_BUFFER_LEN) {
                                     outputBuffer.append(result)
+                                }
+                                val currentRss = MemoryProfiler.getProcessRssMb()
+                                if (currentRss > peakRss) {
+                                    peakRss = currentRss
+                                }
+
+                                val inferredIds = if (tokenizer != null) {
+                                    val singleId = tokenizer.lookupTokenId(result)
+                                    if (singleId != null) listOf(singleId) else tokenizer.encode(result)
+                                } else {
+                                    emptyList()
+                                }
+                                inferredTokenIds.addAll(inferredIds)
+
+                                val fragLen = result.length
+                                val escapedFrag = escapeString(result)
+                                val codePoints = toUnicodeCodePoints(result)
+                                val aggLen = outputBuffer.length
+                                val idStr = if (inferredIds.isNotEmpty()) inferredIds.joinToString(",") else "none"
+                                val traceEntry = "Callback #$callbackCount: text=\"$escapedFrag\", len=$fragLen, codePoints=[$codePoints], aggLen=$aggLen (inferredIds=[$idStr])"
+                                callbackTrace.add(traceEntry)
+
+                                if (callbackCount <= 30 || callbackCount % 50 == 0) {
+                                    SafeLog.d(TAG, "[$invocationId] $traceEntry")
                                 }
                             }
 
-                            override fun onStats(stats: String) = Unit
+                            override fun onStats(stats: String) {
+                                SafeLog.d(TAG, "[$invocationId] ExecuTorch stats: $stats")
+                            }
+
+                            override fun onError(errorCode: Int, message: String) {
+                                callbackErrorCode = errorCode
+                                callbackErrorMessage = message
+                                SafeLog.e(TAG, "[$invocationId] ExecuTorch LlmCallback.onError: code=$errorCode, message=$message")
+                            }
                         }
                     )
-                    val latencyMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L)
-                    AdvisoryOutputParser.parseAndValidate(
-                        rawText = outputBuffer.toString(),
+
+                    val endGenMs = System.currentTimeMillis()
+                    val totalLatencyMs = (endGenMs - startGenMs).coerceAtLeast(1L)
+                    val prefillLatencyMs = if (firstTokenMs > 0L) (firstTokenMs - startGenMs).coerceAtLeast(1L) else totalLatencyMs
+                    val decodeLatencyMs = (totalLatencyMs - prefillLatencyMs).coerceAtLeast(0L)
+                    peakRss = maxOf(peakRss, MemoryProfiler.getProcessRssMb())
+
+                    val wasCancelled = isCancelled.get()
+                    val hasEosText = outputBuffer.contains("<|im_end|>") || outputBuffer.contains("<|endoftext|>")
+                    val terminationReason = when {
+                        wasCancelled -> "EXPLICIT_CANCELLATION"
+                        callbackErrorCode != null -> "ERROR_$callbackErrorCode"
+                        callbackCount >= budget.newTokensBudget -> "MAX_NEW_TOKENS_REACHED"
+                        hasEosText -> "NATURAL_EOS_TEXT_DETECTED"
+                        callbackCount < budget.newTokensBudget -> "NATURAL_EOS"
+                        else -> "COMPLETED"
+                    }
+
+                    latestProfilingMetrics = latestProfilingMetrics.copy(
+                        generationPeakRssMb = peakRss,
+                        prefillLatencyMs = prefillLatencyMs,
+                        generationLatencyMs = totalLatencyMs
+                    )
+
+                    SafeLog.i(
+                        TAG,
+                        "[$invocationId] Generation completed ($terminationReason): callbacks=$callbackCount, outputLength=${outputBuffer.length}, " +
+                        "prefillMs=$prefillLatencyMs, decodeMs=$decodeLatencyMs, totalMs=$totalLatencyMs, " +
+                        "RSS: start=${"%.2f".format(startRss)}MB, peak=${"%.2f".format(peakRss)}MB"
+                    )
+
+                    if (callbackErrorCode != null) {
+                        return@withContext AiAdvisory(
+                            availability = AdvisoryAvailability.UNAVAILABLE,
+                            isDemonstration = false,
+                            unavailableReason = "Engineering advisory generation could not be completed safely. Technical details logged to system log.",
+                            advisoryLatencyMs = totalLatencyMs,
+                            provenanceSummary = currentProvenanceSummary()
+                        )
+                    }
+
+                    // STRICT PRESERVATION: Exact raw output without artificial prefix or characters
+                    val rawOutput = outputBuffer.toString()
+                    latestRawOutput = rawOutput
+                    latestCallbackCount = callbackCount
+                    SafeLog.i(TAG, "[$invocationId] Raw generated output (${rawOutput.length} chars, $callbackCount callbacks):\n$rawOutput")
+
+                    val parsedAdvisory = AdvisoryOutputParser.parseAndValidate(
+                        rawText = rawOutput,
                         officialDisposition = request.officialDisposition,
                         hasVerifiedReferences = request.verifiedReferenceExcerpts.isNotEmpty(),
                         isDemonstration = false,
-                        latencyMs = latencyMs,
-                        provenanceSummary = currentProvenanceSummary()
+                        latencyMs = totalLatencyMs,
+                        provenanceSummary = currentProvenanceSummary(),
+                        hasZeroDefects = request.defects.isEmpty()
                     )
+
+                    // Write diagnostics artifact and exact raw output safely to disk
+                    runCatching {
+                        saveDiagnosticsSafely(
+                            invocationId = invocationId,
+                            request = request,
+                            prompt = prompt,
+                            promptTokens = promptTokens,
+                            promptTokenIds = promptTokenIds,
+                            budget = budget,
+                            genConfig = genConfig,
+                            rawOutput = rawOutput,
+                            callbackCount = callbackCount,
+                            callbackTrace = callbackTrace,
+                            inferredTokenIds = inferredTokenIds,
+                            hasEosText = hasEosText,
+                            terminationReason = terminationReason,
+                            prefillMs = prefillLatencyMs,
+                            decodeMs = decodeLatencyMs,
+                            totalMs = totalLatencyMs,
+                            startRss = startRss,
+                            peakRss = peakRss,
+                            parsedAdvisory = parsedAdvisory
+                        )
+                    }.onFailure { diagErr ->
+                        SafeLog.e(TAG, "[$invocationId] Diagnostic artifact writing failed safely: ${diagErr.message}", diagErr)
+                    }
+
+                    if (rawOutput.isEmpty()) {
+                        return@withContext AiAdvisory(
+                            availability = AdvisoryAvailability.UNAVAILABLE,
+                            isDemonstration = false,
+                            unavailableReason = "Engineering advisory generation produced no output.",
+                            advisoryLatencyMs = totalLatencyMs,
+                            provenanceSummary = currentProvenanceSummary()
+                        )
+                    }
+
+                    parsedAdvisory
                 } catch (c: CancellationException) {
+                    SafeLog.i(TAG, "[$invocationId] Generation cancelled by caller.")
                     runCatching { module.stop() }
                     throw c
                 } catch (e: Throwable) {
+                    SafeLog.e(TAG, "[$invocationId] ExecuTorch generation exception: ${e.message}", e)
+                    val totalLatencyMs = (System.currentTimeMillis() - startGenMs).coerceAtLeast(1L)
                     AiAdvisory(
                         availability = AdvisoryAvailability.UNAVAILABLE,
                         isDemonstration = false,
-                        unavailableReason = "ExecuTorch generation failed safely: ${e.message ?: "runtime error"}",
-                        advisoryLatencyMs = (System.currentTimeMillis() - startMs).coerceAtLeast(1L),
+                        unavailableReason = "Engineering advisory generation encountered a runtime error. Technical details logged to system log.",
+                        advisoryLatencyMs = totalLatencyMs,
                         provenanceSummary = currentProvenanceSummary()
                     )
                 } finally {
                     isGenerating.set(false)
+                    // Reset KV-cache context after generation to leave clean state
+                    SafeLog.i(TAG, "[$invocationId] Resetting KV-cache context via module.resetContext() post-inference.")
+                    runCatching { module.resetContext() }.onFailure { err ->
+                        SafeLog.w(TAG, "[$invocationId] Post-generation resetContext warning: ${err.message}")
+                    }
                 }
             }
         }
 
     fun cancelActiveGeneration() {
         if (isGenerating.get()) {
+            isCancelled.set(true)
             runCatching { llmModule?.stop() }
+        }
+    }
+
+    /**
+     * Executes raw generation for diagnostic probe testing.
+     * Follows identical KV-cache reset and LlmGenerationConfig lifecycle.
+     */
+    suspend fun generateRaw(
+        prompt: String,
+        maxNewTokens: Int = 128,
+        temperature: Float = 0.2f
+    ): String = inferenceMutex.withLock {
+        withContext(ioDispatcher) {
+            val module = llmModule
+            if (module == null || _modelInfo.value.state != ModelRuntimeState.READY) {
+                return@withContext ""
+            }
+            runCatching { module.resetContext() }.onFailure { err ->
+                SafeLog.w(TAG, "Pre-generateRaw resetContext warning: ${err.message}")
+            }
+            val tokenizer = getOrLoadTokenizer()
+            val promptTokenIds = tokenizer?.encode(prompt) ?: emptyList()
+            val promptTokens = if (promptTokenIds.isNotEmpty()) promptTokenIds.size else (prompt.length / 3).coerceAtLeast(1)
+            val budget = GenerationBudgeter.calculate(
+                promptTokens = promptTokens,
+                maxContextLen = MAX_CONTEXT_LEN,
+                maxNewTokens = maxNewTokens
+            )
+            val genConfig = LlmGenerationConfig.create()
+                .seqLen(budget.totalSeqLen)
+                .maxNewTokens(budget.newTokensBudget)
+                .temperature(temperature)
+                .echo(false)
+                .build()
+            val outputBuffer = StringBuilder()
+            var callbackCount = 0
+            isCancelled.set(false)
+            isGenerating.set(true)
+            try {
+                module.generate(
+                    prompt,
+                    genConfig,
+                    object : LlmCallback {
+                        override fun onResult(result: String) {
+                            callbackCount++
+                            if (outputBuffer.length < MAX_RAW_BUFFER_LEN) {
+                                outputBuffer.append(result)
+                            }
+                        }
+                        override fun onStats(stats: String) {}
+                        override fun onError(errorCode: Int, message: String) {
+                            SafeLog.e(TAG, "generateRaw onError: code=$errorCode, message=$message")
+                        }
+                    }
+                )
+            } finally {
+                isGenerating.set(false)
+                runCatching { module.resetContext() }.onFailure { err ->
+                    SafeLog.w(TAG, "Post-generateRaw resetContext warning: ${err.message}")
+                }
+            }
+            val res = outputBuffer.toString()
+            latestRawOutput = res
+            latestCallbackCount = callbackCount
+            res
         }
     }
 
@@ -211,15 +500,23 @@ class ExecuTorchAdvisoryEngine(
         cancelActiveGeneration()
         inferenceMutex.withLock {
             withContext(ioDispatcher) {
-                runCatching { llmModule?.resetNative() }
+                runCatching { llmModule?.resetContext() }
+                runCatching { llmModule?.close() }
                 llmModule = null
+                smolLm2Tokenizer = null
+                val unloadRss = MemoryProfiler.getProcessRssMb()
+                latestProfilingMetrics = latestProfilingMetrics.copy(
+                    unloadRssMb = unloadRss
+                )
+                SafeLog.i(TAG, "SmolLM2 unloaded. RSS: ${"%.2f".format(unloadRss)}MB")
+
                 val hasBoth = !activeModelPath.isNullOrBlank() && !activeTokenizerPath.isNullOrBlank()
                 _modelInfo.value = _modelInfo.value.copy(
                     state = if (hasBoth) ModelRuntimeState.UNLOADED else ModelRuntimeState.NOT_LOADED,
                     detailMessage = if (hasBoth) {
                         "Artifacts stored; ExecuTorch session unloaded to free RAM."
                     } else {
-                        "Not loaded. Import Llama 3.2 1B .pte and tokenizer files in Settings."
+                        "Not loaded. Import SmolLM2 360M .pte and tokenizer files in Settings."
                     }
                 )
             }
@@ -233,14 +530,26 @@ class ExecuTorchAdvisoryEngine(
     fun inspectCurrentMetadataText(): String {
         val info = _modelInfo.value
         return buildString {
-            appendLine("Slot: AI Technical Advisory (Llama 3.2 1B Instruct)")
+            appendLine("Slot: AI Technical Advisory (SmolLM2 360M Instruct)")
             appendLine("State: ${info.state.name}")
             appendLine("Runtime: ${info.runtimeLabel}")
             appendLine("Model (.pte): ${info.artifactPath ?: "None"}")
             appendLine("Tokenizer: ${info.tokenizerPath ?: "None"}")
             appendLine("Model SHA-256: ${info.sha256 ?: "N/A"}")
             appendLine("Prompt Contract: ${info.contractVersion ?: AdvisoryPromptBuilder.PROMPT_VERSION}")
+            appendLine("Max Context Len: $MAX_CONTEXT_LEN")
+            appendLine("Max New Tokens: $MAX_NEW_TOKENS")
         }
+    }
+
+    private fun getOrLoadTokenizer(): SmolLm2Tokenizer? {
+        if (smolLm2Tokenizer != null) return smolLm2Tokenizer
+        val tPath = activeTokenizerPath ?: return null
+        val tFile = File(tPath)
+        if (tFile.exists() && tFile.name.endsWith(".json", ignoreCase = true)) {
+            smolLm2Tokenizer = runCatching { SmolLm2Tokenizer.load(tFile) }.getOrNull()
+        }
+        return smolLm2Tokenizer
     }
 
     private fun validateArtifactExtensions(modelFile: File, tokenizerFile: File) {
@@ -272,17 +581,230 @@ class ExecuTorchAdvisoryEngine(
 
     private fun initialNotLoadedInfo(): ModelInfo = ModelInfo(
         slot = ModelSlot.AI_ADVISORY,
-        displayName = "Llama 3.2 1B Instruct",
+        displayName = "SmolLM2 360M Instruct",
         runtimeLabel = "ExecuTorch Android $EXECUTORCH_RUNTIME_VERSION",
         state = ModelRuntimeState.NOT_LOADED,
         contractVersion = AdvisoryPromptBuilder.PROMPT_VERSION,
         runtimeVersion = EXECUTORCH_RUNTIME_VERSION,
-        detailMessage = "Not loaded. Import Llama 3.2 1B .pte and tokenizer files in Settings.",
+        detailMessage = "Not loaded. Import SmolLM2 360M .pte and tokenizer files in Settings.",
         isDemonstrationOnly = false
     )
 
+    private fun saveDiagnosticsSafely(
+        invocationId: Long,
+        request: AdvisoryRequest,
+        prompt: String,
+        promptTokens: Int,
+        promptTokenIds: List<Int>,
+        budget: GenerationBudget,
+        genConfig: LlmGenerationConfig,
+        rawOutput: String,
+        callbackCount: Int,
+        callbackTrace: List<String>,
+        inferredTokenIds: List<Int>,
+        hasEosText: Boolean,
+        terminationReason: String,
+        prefillMs: Long,
+        decodeMs: Long,
+        totalMs: Long,
+        startRss: Double,
+        peakRss: Double,
+        parsedAdvisory: AiAdvisory
+    ) {
+        val targetDir = debugOutputDir
+            ?: File("/data/user/0/com.aistudio.bharatpcb.xkqzmw/files").takeIf { it.exists() && it.canWrite() }
+            ?: File("/data/data/com.aistudio.bharatpcb.xkqzmw/files").takeIf { it.exists() && it.canWrite() }
+
+        val hasOpenBrace = rawOutput.contains('{')
+        val hasCloseBrace = rawOutput.contains('}')
+        val hasQuote = rawOutput.contains('"')
+        val hasImEnd = rawOutput.contains("<|im_end|>")
+        val hasEndOfText = rawOutput.contains("<|endoftext|>")
+        val hasImStart = rawOutput.contains("<|im_start|>")
+
+        val charFreq = computeCharFrequencies(rawOutput)
+        val escapedRawOutput = escapeString(rawOutput)
+
+        val report = buildString {
+            appendLine("================================================================================")
+            appendLine("SMOLLM2 360M EXECUCTORCH INFERENCE DIAGNOSTIC REPORT")
+            appendLine("================================================================================")
+            appendLine("Invocation ID       : $invocationId")
+            appendLine("Inspection ID       : ${request.inspectionId}")
+            appendLine("Board Name          : ${request.boardName}")
+            appendLine("Official Disposition: ${request.officialDisposition.name}")
+            appendLine("Model Path          : ${activeModelPath ?: "N/A"}")
+            appendLine("Tokenizer Path      : ${activeTokenizerPath ?: "N/A"}")
+            appendLine("Runtime Version     : ExecuTorch $EXECUTORCH_RUNTIME_VERSION")
+            appendLine("Contract Version    : ${AdvisoryPromptBuilder.PROMPT_VERSION}")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("CALLBACK EMISSION TRACE & HEURISTIC INFERRED TOKEN IDS")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("Prompt Tokens Count : ${promptTokenIds.size} (est=$promptTokens)")
+            appendLine("Prompt Token IDs (first 30): ${promptTokenIds.take(30).joinToString(", ")}${if (promptTokenIds.size > 30) "..." else ""}")
+            appendLine("Generation Budget   : ${budget.newTokensBudget} tokens (seqLen=${budget.totalSeqLen})")
+            appendLine("Callbacks Received  : $callbackCount (output chars: ${rawOutput.length})")
+            appendLine("Inferred Token IDs  : ${inferredTokenIds.take(60).joinToString(", ")}${if (inferredTokenIds.size > 60) "..." else ""}")
+            appendLine("Note: ExecuTorch 1.6.0 JNI delivers UTF-8 string fragments via LlmCallback.onResult().")
+            appendLine("      Native integer token IDs are not exposed over JNI; Inferred Token IDs are heuristic.")
+            appendLine("Termination Reason  : $terminationReason")
+            appendLine("EOS Text In Output  : $hasEosText")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("GENERATION CONFIGURATION & BUDGET")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("Prompt Tokens (est) : $promptTokens")
+            appendLine("Prompt Chars Length : ${prompt.length}")
+            appendLine("Config seqLen       : ${budget.totalSeqLen}")
+            appendLine("Config maxNewTokens : ${budget.newTokensBudget}")
+            appendLine("Config temperature  : ${genConfig.temperature}")
+            appendLine("Config echo         : ${genConfig.echo}")
+            appendLine("Config numBos       : ${genConfig.numBos}")
+            appendLine("Config numEos       : ${genConfig.numEos}")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("EXECUTION METRICS")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("Termination Reason  : $terminationReason")
+            appendLine("Total Callbacks     : $callbackCount")
+            appendLine("Raw Output Length   : ${rawOutput.length} chars")
+            appendLine("Prefill Latency     : ${prefillMs}ms")
+            appendLine("Decode Latency      : ${decodeMs}ms")
+            appendLine("Total Latency       : ${totalMs}ms")
+            appendLine("RSS (Start / Peak)  : ${"%.2f".format(startRss)}MB / ${"%.2f".format(peakRss)}MB")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("SPECIAL MARKER & TOKEN PRESENCE")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("Contains '{'          : $hasOpenBrace")
+            appendLine("Contains '}'          : $hasCloseBrace")
+            appendLine("Contains '\"'          : $hasQuote")
+            appendLine("Contains '<|im_end|>' : $hasImEnd")
+            appendLine("Contains '<|endoftext|>': $hasEndOfText")
+            appendLine("Contains '<|im_start|>': $hasImStart")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("CHARACTER FREQUENCY ANALYSIS")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine(charFreq)
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("PARSER EVALUATION")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("Availability        : ${parsedAdvisory.availability}")
+            appendLine("Unavailable Reason  : ${parsedAdvisory.unavailableReason ?: "None (Available)"}")
+            appendLine("Probable Root Cause : ${parsedAdvisory.probableRootCause ?: "N/A"}")
+            appendLine("Operator Action     : ${parsedAdvisory.recommendedOperatorAction ?: "N/A"}")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("EXACT PROMPT PASSED TO module.generate():")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine(prompt)
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("EXACT RAW OUTPUT (UNALTERED):")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine(rawOutput)
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("ESCAPED RAW OUTPUT:")
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine(escapedRawOutput)
+            appendLine("--------------------------------------------------------------------------------")
+            appendLine("CALLBACK-BY-CALLBACK TRACE (first 30 and last 20):")
+            appendLine("--------------------------------------------------------------------------------")
+            if (callbackTrace.size <= 50) {
+                callbackTrace.forEach { appendLine(it) }
+            } else {
+                callbackTrace.take(30).forEach { appendLine(it) }
+                appendLine("... [${callbackTrace.size - 50} intermediate callbacks omitted for brevity] ...")
+                callbackTrace.takeLast(20).forEach { appendLine(it) }
+            }
+            appendLine("================================================================================")
+        }
+
+        SafeLog.i(TAG, "[$invocationId] Diagnostic summary: len=${rawOutput.length}, callbacks=$callbackCount, quotes=$hasQuote, openBrace=$hasOpenBrace, closeBrace=$hasCloseBrace, imEnd=$hasImEnd")
+        SafeLog.i(TAG, "[$invocationId] Character Frequencies:\n$charFreq")
+
+        if (targetDir != null) {
+            try {
+                if (!targetDir.exists()) targetDir.mkdirs()
+
+                val rawFile = File(targetDir, "smollm2_raw_output.txt")
+                rawFile.writeText(rawOutput)
+                SafeLog.i(TAG, "[$invocationId] Wrote raw output (${rawFile.length()} bytes) to: ${rawFile.absolutePath}")
+
+                val diagFile = File(targetDir, "smollm2_debug_diagnostics.txt")
+                diagFile.writeText(report)
+                SafeLog.i(TAG, "[$invocationId] Wrote full diagnostics (${diagFile.length()} bytes) to: ${diagFile.absolutePath}")
+            } catch (e: Throwable) {
+                SafeLog.e(TAG, "[$invocationId] Failed to write diagnostics to ${targetDir.absolutePath}: ${e.message}", e)
+            }
+        } else {
+            SafeLog.w(TAG, "[$invocationId] debugOutputDir is null; cannot write smollm2_raw_output.txt to disk.")
+        }
+    }
+
+    private fun escapeString(s: String): String = buildString {
+        for (c in s) {
+            when (c) {
+                '\\' -> append("\\\\")
+                '\"' -> append("\\\"")
+                '\n' -> append("\\n")
+                '\r' -> append("\\r")
+                '\t' -> append("\\t")
+                '\b' -> append("\\b")
+                '\u000c' -> append("\\f")
+                in '\u0000'..'\u001f', in '\u007f'..'\u009f' -> append(String.format(Locale.US, "\\u%04X", c.code))
+                else -> append(c)
+            }
+        }
+    }
+
+    internal fun toUnicodeCodePoints(s: String): String {
+        return s.codePoints().toArray().joinToString(" ") { String.format(Locale.US, "U+%04X", it) }
+    }
+
+    internal fun computeCharFrequencies(s: String): String {
+        if (s.isEmpty()) return "  (empty output buffer)"
+        val map = mutableMapOf<Char, Int>()
+        for (c in s) {
+            map[c] = (map[c] ?: 0) + 1
+        }
+        return map.entries
+            .sortedByDescending { it.value }
+            .joinToString("\n") { (ch, count) ->
+                val label = when (ch) {
+                    '\n' -> "\\n (newline)"
+                    '\r' -> "\\r (carriage return)"
+                    '\t' -> "\\t (tab)"
+                    ' ' -> "<space>"
+                    '\"' -> "\\\" (quote)"
+                    else -> "'$ch'"
+                }
+                val codeHex = String.format(Locale.US, "U+%04X", ch.code)
+                val pctStr = String.format(Locale.US, "%.1f%%", count * 100.0 / s.length)
+                "  $label [$codeHex]: $count ($pctStr)"
+            }
+    }
+
     companion object {
-        const val EXECUTORCH_RUNTIME_VERSION = "1.0.1"
-        private const val MAX_OUTPUT_SEQ_LEN = 384
+        private const val TAG = "ExecuTorchAdvisory"
+        const val EXECUTORCH_RUNTIME_VERSION = "1.6.0"
+        const val MAX_CONTEXT_LEN = 2048
+        const val MAX_NEW_TOKENS = 384
+        private const val MAX_RAW_BUFFER_LEN = 8192
+    }
+}
+
+private object SafeLog {
+    fun i(tag: String, msg: String) {
+        runCatching { android.util.Log.i(tag, msg) }.onFailure { println("[$tag] INFO: $msg") }
+    }
+    fun w(tag: String, msg: String) {
+        runCatching { android.util.Log.w(tag, msg) }.onFailure { println("[$tag] WARN: $msg") }
+    }
+    fun e(tag: String, msg: String, tr: Throwable? = null) {
+        runCatching {
+            if (tr != null) android.util.Log.e(tag, msg, tr)
+            else android.util.Log.e(tag, msg)
+        }.onFailure {
+            println("[$tag] ERROR: $msg ${tr?.message.orEmpty()}")
+        }
+    }
+    fun d(tag: String, msg: String) {
+        runCatching { android.util.Log.d(tag, msg) }.onFailure { println("[$tag] DEBUG: $msg") }
     }
 }

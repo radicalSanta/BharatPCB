@@ -122,8 +122,27 @@ object DefectTaxonomy {
         )
     )
 
+    /**
+     * Authoritative PatchCore transistor anomaly screening label table.
+     */
+    val transistorEntries: List<TaxonomyEntry> = listOf(
+        TaxonomyEntry(
+            normalizedKey = "transistor_anomaly",
+            canonicalLabel = "Transistor Anomaly",
+            defaultSeverity = DefectSeverity.MANUAL_REVIEW,
+            requiresManualReview = true,
+            code = "TR-ANOMALY-REVIEW",
+            description = "PatchCore anomaly detection flag; requires operator manual review screening.",
+            isKnownClass = true
+        )
+    )
+
     private val lookupByKey: Map<String, TaxonomyEntry> = buildMap {
         canonicalEntries.forEach { entry ->
+            put(entry.normalizedKey, entry)
+            put(normalizeKey(entry.canonicalLabel), entry)
+        }
+        transistorEntries.forEach { entry ->
             put(entry.normalizedKey, entry)
             put(normalizeKey(entry.canonicalLabel), entry)
         }

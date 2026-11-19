@@ -28,6 +28,7 @@ import com.example.ui.theme.LocalPcbColors
 fun RuntimeStatusDialog(
     detectionModelInfo: ModelInfo,
     advisoryModelInfo: ModelInfo,
+    transistorModelInfo: ModelInfo? = null,
     onOpenSettings: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -45,11 +46,12 @@ fun RuntimeStatusDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    text = "Real camera and gallery inspections require an imported, loaded YOLOv8n .onnx detector. Sample boards run through the isolated demo simulator.",
+                    text = "Real camera and gallery inspections require imported, loaded on-device models. Sample boards run through the isolated demo simulator.",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.textSecondary
                 )
                 RuntimeDialogSlotCard(info = detectionModelInfo)
+                transistorModelInfo?.let { RuntimeDialogSlotCard(info = it) }
                 RuntimeDialogSlotCard(info = advisoryModelInfo)
             }
         },

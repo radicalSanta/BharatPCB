@@ -77,6 +77,7 @@ import com.example.domain.model.AdvisoryAvailability
 import com.example.domain.model.DetectedDefect
 import com.example.domain.model.InspectionDisposition
 import com.example.domain.model.InspectionRecord
+import com.example.domain.model.InspectionTarget
 import com.example.presentation.components.DemonstrationBadge
 import com.example.presentation.components.DispositionBadge
 import com.example.presentation.components.SeverityChip
@@ -264,6 +265,20 @@ fun ResultsScreen(
                                 disposition = record.officialDisposition,
                                 modifier = Modifier.testTag("results_disposition_badge")
                             )
+                            Surface(
+                                shape = RoundedCornerShape(50),
+                                color = colors.surfaceSubtle,
+                                border = BorderStroke(1.dp, colors.divider),
+                                modifier = Modifier.testTag("results_target_badge")
+                            ) {
+                                Text(
+                                    text = if (record.target == InspectionTarget.TRANSISTOR) "Transistor" else "PCB Board",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = colors.textPrimary,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                )
+                            }
                             if (record.isDemonstration) {
                                 DemonstrationBadge(label = "DEMO")
                             }
@@ -281,6 +296,152 @@ fun ResultsScreen(
                             style = MaterialTheme.typography.labelSmall,
                             color = colors.textSecondary
                         )
+                    }
+                }
+            }
+        }
+
+        if (record.target == InspectionTarget.TRANSISTOR) {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = colors.surfaceCard,
+                    border = BorderStroke(1.dp, colors.divider),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("results_transistor_metrics_card")
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Transistor PatchCore Metrics",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = colors.textPrimary
+                            )
+                            if (record.officialDisposition == InspectionDisposition.PASS) {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = colors.passBg
+                                ) {
+                                    Text(
+                                        text = "NORMAL",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.passFg,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            } else if (record.officialDisposition == InspectionDisposition.REVIEW) {
+                                Surface(
+                                    shape = RoundedCornerShape(50),
+                                    color = colors.reviewBg
+                                ) {
+                                    Text(
+                                        text = "ANOMALOUS",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = colors.reviewFg,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                                    )
+                                }
+                            }
+                        }
+
+                        HorizontalDivider(color = colors.divider)
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column {
+                                Text(
+                                    text = "Raw Anomaly Score",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.textSecondary
+                                )
+                                Text(
+                                    text = record.transistorAnomaly?.rawAnomalyScore?.let { String.format(Locale.US, "%.4f", it) } ?: "N/A",
+                                    style = MaterialTheme.typography.titleSmall.merge(MonoTextStyles.tabularMetric),
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = colors.textPrimary,
+                                    modifier = Modifier.testTag("results_transistor_raw_score")
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "Display Score",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.textSecondary
+                                )
+                                Text(
+                                    text = record.transistorAnomaly?.normalizedDisplayScore?.let { String.format(Locale.US, "%.1f%%", it * 100f) } ?: "N/A",
+                                    style = MaterialTheme.typography.titleSmall.merge(MonoTextStyles.tabularMetric),
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = colors.textPrimary,
+                                    modifier = Modifier.testTag("results_transistor_norm_score")
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "Anomaly Area",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.textSecondary
+                                )
+                                Text(
+                                    text = record.transistorAnomaly?.affectedAreaPercent?.let { String.format(Locale.US, "%.2f%%", it) } ?: "0.00%",
+                                    style = MaterialTheme.typography.titleSmall.merge(MonoTextStyles.tabularMetric),
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = colors.textPrimary,
+                                    modifier = Modifier.testTag("results_transistor_area_percent")
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = "Inference Latency",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = colors.textSecondary
+                                )
+                                val latencyMs = record.latencyMetrics.patchCoreInferenceMs ?: record.modelInferenceLatencyMs
+                                Text(
+                                    text = latencyMs?.let { "${it}ms" } ?: "N/A",
+                                    style = MaterialTheme.typography.titleSmall.merge(MonoTextStyles.tabularMetric),
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = colors.textPrimary,
+                                    modifier = Modifier.testTag("results_transistor_latency")
+                                )
+                            }
+                        }
+
+                        if (record.officialDisposition == InspectionDisposition.PASS) {
+                            Text(
+                                text = "Normal transistor component. Anomaly score is within nominal boundaries; no anomalous localized region identified.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.textSecondary
+                            )
+                        } else if (record.officialDisposition == InspectionDisposition.REVIEW) {
+                            val hasBox = record.defects.any { it.boundingBox != null }
+                            if (hasBox) {
+                                Text(
+                                    text = "Transistor anomaly detected above screening threshold (code: TR-ANOMALY-REVIEW). Localized anomaly region highlighted in viewport.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.reviewFg
+                                )
+                            } else {
+                                Text(
+                                    text = "Transistor anomaly detected above screening threshold (code: TR-ANOMALY-REVIEW). No localized bounding box available for this anomaly (diffuse or low-gradient anomaly map). Full-frame fallback is prohibited.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.reviewFg
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -425,10 +586,15 @@ fun ResultsScreen(
             }
         }
 
-        // Defect List
+        // Defect / Anomaly List
         item {
+            val listTitle = if (record.target == InspectionTarget.TRANSISTOR) {
+                "Detected Anomalies (${record.defects.size})"
+            } else {
+                "Detected Defects (${record.defects.size})"
+            }
             Text(
-                text = "Detected Defects (${record.defects.size})",
+                text = listTitle,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = colors.textPrimary
@@ -450,6 +616,8 @@ fun ResultsScreen(
                         Text(
                             text = if (record.officialDisposition == InspectionDisposition.INCOMPLETE) {
                                 "No detections available (inspection incomplete)"
+                            } else if (record.target == InspectionTarget.TRANSISTOR) {
+                                "No transistor anomalies detected"
                             } else {
                                 "No PCB defects detected"
                             },
@@ -459,6 +627,8 @@ fun ResultsScreen(
                         Text(
                             text = if (record.officialDisposition == InspectionDisposition.INCOMPLETE) {
                                 "Inference could not complete reliably. Resolve the runtime or image issue and re-inspect."
+                            } else if (record.target == InspectionTarget.TRANSISTOR) {
+                                "Anomaly score remained below the defect decision threshold."
                             } else {
                                 "Zero bounding boxes exceeded the detector confidence threshold."
                             },
@@ -673,7 +843,7 @@ private fun InteractiveAnnotatedPcbViewport(
                     if (showAnnotated && record.defects.isNotEmpty()) {
                         Canvas(modifier = Modifier.fillMaxSize()) {
                             record.defects.forEach { defect ->
-                                val box = defect.boundingBox.clamped()
+                                val box = defect.boundingBox?.clamped() ?: return@forEach
                                 val left = box.x * size.width
                                 val top = box.y * size.height
                                 val w = box.width * size.width
@@ -700,7 +870,7 @@ private fun InteractiveAnnotatedPcbViewport(
 
                         // Clickable normalized box hit-targets + compact labels
                         record.defects.forEachIndexed { idx, defect ->
-                            val box = defect.boundingBox.clamped()
+                            val box = defect.boundingBox?.clamped() ?: return@forEachIndexed
                             val leftPx = (box.x * widthPx).roundToInt()
                             val topPx = (box.y * heightPx).roundToInt()
                             val boxW = with(LocalDensity.current) { (box.width * widthPx).toDp() }
@@ -776,8 +946,8 @@ private fun DefectListRow(
                 )
             }
             val box = defect.boundingBox
-            Text(
-                text = String.format(
+            val boxText = if (box != null) {
+                String.format(
                     Locale.US,
                     "Confidence %.1f%% • Box [%.2f, %.2f, %.2f, %.2f]",
                     defect.confidence * 100f,
@@ -785,10 +955,26 @@ private fun DefectListRow(
                     box.y,
                     box.width,
                     box.height
-                ),
+                )
+            } else {
+                String.format(
+                    Locale.US,
+                    "Confidence %.1f%% • No localized region",
+                    defect.confidence * 100f
+                )
+            }
+            Text(
+                text = boxText,
                 style = MaterialTheme.typography.bodySmall.merge(MonoTextStyles.tabularMetric),
                 color = colors.textSecondary
             )
+            defect.code?.let { code ->
+                Text(
+                    text = "Code: $code",
+                    style = MaterialTheme.typography.labelSmall.merge(MonoTextStyles.tabularMetric),
+                    color = colors.textSecondary
+                )
+            }
             if (defect.requiresManualReview) {
                 Text(
                     text = "Requires manual verification",

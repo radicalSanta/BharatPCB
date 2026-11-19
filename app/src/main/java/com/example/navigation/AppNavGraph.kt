@@ -83,7 +83,10 @@ fun AppNavGraph(
                     onStartInspectionClick = { navigateToTopLevel(TopLevelDestination.INSPECT) },
                     onHistoryClick = { navigateToTopLevel(TopLevelDestination.HISTORY) },
                     onRecordClick = { recordId -> navController.navigate(AppRoute.Results(recordId)) },
-                    onSettingsClick = { navigateToTopLevel(TopLevelDestination.SETTINGS) }
+                    onSettingsClick = { navigateToTopLevel(TopLevelDestination.SETTINGS) },
+                    onDispositionClick = { disposition ->
+                        navController.navigate(AppRoute.History(initialDisposition = disposition.name))
+                    }
                 )
             }
 
@@ -113,16 +116,20 @@ fun AppNavGraph(
                             navController.navigate(AppRoute.Results(recordId))
                         }
                     },
-                    onOpenSettingsClick = { navigateToTopLevel(TopLevelDestination.SETTINGS) }
+                    onOpenSettingsClick = { navigateToTopLevel(TopLevelDestination.SETTINGS) },
+                    onTargetSelected = vm::onTargetSelected
                 )
             }
 
-            composable<AppRoute.History> {
+            composable<AppRoute.History> { backStackEntry ->
+                val historyRoute = backStackEntry.toRoute<AppRoute.History>()
                 val vm: HistoryViewModel = viewModel(
+                    key = "history_${historyRoute.initialDisposition}",
                     factory = HistoryViewModel.Factory(
                         inspectionRepository = container.inspectionRepository,
                         csvExportManager = container.csvExportManager,
-                        storageAccessManager = container.storageAccessManager
+                        storageAccessManager = container.storageAccessManager,
+                        initialDisposition = historyRoute.initialDisposition
                     )
                 )
                 val uiState by vm.uiState.collectAsStateWithLifecycle()
@@ -166,6 +173,9 @@ fun AppNavGraph(
                     onImportDetectionModel = vm::importDetectionModel,
                     onLoadDetectionModel = vm::loadDetectionModel,
                     onUnloadDetectionModel = vm::unloadDetectionModel,
+                    onImportTransistorModel = vm::importTransistorModel,
+                    onLoadTransistorModel = vm::loadTransistorModel,
+                    onUnloadTransistorModel = vm::unloadTransistorModel,
                     onImportAdvisoryModel = vm::importAdvisoryModel,
                     onImportAdvisoryTokenizer = vm::importAdvisoryTokenizer,
                     onLoadAdvisoryModel = vm::loadAdvisoryModel,

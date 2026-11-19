@@ -78,4 +78,33 @@ class AdvisoryParserTest {
         )
         assertEquals(AdvisoryAvailability.UNAVAILABLE, result.availability)
     }
+
+    @Test
+    fun `ChatML EOS tag and markdown code fences are stripped cleanly`() {
+        val raw = """
+            ```json
+            {
+              "probable_root_cause": "Copper spur on trace edge.",
+              "recommended_operator_action": "Trim protrusion per rework SOP.",
+              "relevant_standard": "IPC-A-610 Section 10.1.2",
+              "limitations": "Local defect analysis only."
+            }
+            ```
+            <|im_end|>
+        """.trimIndent()
+
+        val result = AdvisoryOutputParser.parseAndValidate(
+            rawText = raw,
+            officialDisposition = InspectionDisposition.REVIEW,
+            hasVerifiedReferences = true,
+            isDemonstration = false,
+            latencyMs = 250L,
+            provenanceSummary = "ExecuTorch 1.6.0"
+        )
+        assertEquals(AdvisoryAvailability.AVAILABLE, result.availability)
+        assertEquals("Copper spur on trace edge.", result.probableRootCause)
+        assertEquals("Trim protrusion per rework SOP.", result.recommendedOperatorAction)
+        assertEquals("IPC-A-610 Section 10.1.2", result.relevantStandard)
+        assertEquals("Local defect analysis only.", result.limitations)
+    }
 }

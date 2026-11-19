@@ -13,7 +13,7 @@ sealed interface YoloDecodeResult {
 }
 
 object YoloOutputDecoder {
-    const val DECODER_VERSION = "yolo-v8-640-fp32-v2"
+    const val DECODER_VERSION = "yolo-v8-640-fp32-v3"
     const val DEFAULT_CONFIDENCE_THRESHOLD = 0.33f
     const val DEFAULT_IOU_THRESHOLD = 0.45f
     const val BORDER_GUARD_MARGIN_PX = 8.0f
@@ -23,7 +23,8 @@ object YoloOutputDecoder {
     /**
      * Decodes a 3D [1, 4 + C, N] (e.g. [1, 15, 8400]) or [1, N, 4 + C] YOLOv8 ONNX output tensor,
      * reverses letterbox coordinates back to original frame space, applies global class-agnostic NMS,
-     * filters edge border-crop noise, and runs populated green-PCB HSV refinement for class ID 9.
+     * and filters edge border-crop noise. Preserves original model class index and confidence directly
+     * without heuristic HSV-based class remapping.
      */
     fun decode(
         flatData: FloatArray,
@@ -143,7 +144,6 @@ object YoloOutputDecoder {
         val w0f = w0.toFloat()
         val h0f = h0.toFloat()
         val frameArea = max(1L, w0.toLong() * h0.toLong()).toDouble()
-        var cachedGreenBoard: Boolean? = null
 
         val detections = mutableListOf<DetectedDefect>()
         for (cand in kept) {
@@ -160,24 +160,6 @@ object YoloOutputDecoder {
                 continue
             }
 
-            val finalClassId = if (cand.classIndex == GreenPcbDefectRefiner.TARGET_SCRATCH_CLASS_ID && sourceBitmap != null) {
-                val isGreen = cachedGreenBoard ?: GreenPcbDefectRefiner.isGreenSolderMaskBoard(sourceBitmap).also {
-                    cachedGreenBoard = it
-                }
-                val (roiX1, roiY1, roiX2, roiY2) = toTruncatedRoiPixelBounds(cand, w0, h0)
-                GreenPcbDefectRefiner.refineClassId(
-                    bitmap = sourceBitmap,
-                    x1 = roiX1,
-                    y1 = roiY1,
-                    x2 = roiX2,
-                    y2 = roiY2,
-                    classId = cand.classIndex,
-                    knownGreenBoard = isGreen
-                )
-            } else {
-                cand.classIndex
-            }
-
             val normalizedBox = BoundingBox(
                 x = cand.x1Px / w0f,
                 y = cand.y1Px / h0f,
@@ -187,7 +169,7 @@ object YoloOutputDecoder {
 
             detections.add(
                 toDetectedDefect(
-                    classIndex = finalClassId,
+                    classIndex = cand.classIndex,
                     confidence = cand.confidence,
                     normalizedBox = normalizedBox,
                     classLabels = classLabels

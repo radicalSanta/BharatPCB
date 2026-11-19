@@ -61,6 +61,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.example.domain.model.InspectionDisposition
 import com.example.domain.model.InspectionRecord
 import com.example.domain.model.ModelInfo
 import com.example.domain.usecase.DailyTrendPoint
@@ -87,7 +88,8 @@ fun DashboardScreen(
     onStartInspectionClick: () -> Unit,
     onHistoryClick: () -> Unit,
     onRecordClick: (String) -> Unit,
-    onSettingsClick: () -> Unit
+    onSettingsClick: () -> Unit,
+    onDispositionClick: (InspectionDisposition) -> Unit = {}
 ) {
     val colors = LocalPcbColors.current
     var showRuntimeDialog by remember { mutableStateOf(false) }
@@ -96,6 +98,7 @@ fun DashboardScreen(
         RuntimeStatusDialog(
             detectionModelInfo = uiState.detectionModelInfo,
             advisoryModelInfo = uiState.advisoryModelInfo,
+            transistorModelInfo = uiState.transistorModelInfo,
             onOpenSettings = onSettingsClick,
             onDismiss = { showRuntimeDialog = false }
         )
@@ -118,7 +121,8 @@ fun DashboardScreen(
         item {
             InspectionOverviewAnchorCard(
                 uiState = uiState,
-                onSelectPeriod = onSelectPeriod
+                onSelectPeriod = onSelectPeriod,
+                onDispositionClick = onDispositionClick
             )
         }
 
@@ -182,7 +186,10 @@ fun DashboardScreen(
         }
 
         item {
-            InspectionOutcomesSection(uiState = uiState)
+            InspectionOutcomesSection(
+                uiState = uiState,
+                onDispositionClick = onDispositionClick
+            )
         }
 
         item {
@@ -206,6 +213,7 @@ fun DashboardScreen(
             ModelReadinessSection(
                 detectionModelInfo = uiState.detectionModelInfo,
                 advisoryModelInfo = uiState.advisoryModelInfo,
+                transistorModelInfo = uiState.transistorModelInfo,
                 onConfigureClick = onSettingsClick
             )
             Spacer(modifier = Modifier.height(12.dp))
@@ -216,7 +224,8 @@ fun DashboardScreen(
 @Composable
 private fun InspectionOverviewAnchorCard(
     uiState: DashboardUiState,
-    onSelectPeriod: (DashboardPeriod) -> Unit
+    onSelectPeriod: (DashboardPeriod) -> Unit,
+    onDispositionClick: (InspectionDisposition) -> Unit
 ) {
     val colors = LocalPcbColors.current
     var periodExpanded by remember { mutableStateOf(false) }
@@ -323,7 +332,10 @@ private fun InspectionOverviewAnchorCard(
                     count = uiState.metrics.passCount,
                     valueColor = if (colors.isDark) Color(0xFF157F40) else Color(0xFF4CD17D),
                     labelColor = colors.anchorSubtleText,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onDispositionClick(InspectionDisposition.PASS) }
+                        .testTag("dashboard_metric_pass")
                 )
                 VerticalOverviewDivider(colors.anchorDivider)
                 OverviewSubMetric(
@@ -331,7 +343,10 @@ private fun InspectionOverviewAnchorCard(
                     count = uiState.metrics.reviewCount,
                     valueColor = if (colors.isDark) Color(0xFFA66000) else Color(0xFFF4B942),
                     labelColor = colors.anchorSubtleText,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onDispositionClick(InspectionDisposition.REVIEW) }
+                        .testTag("dashboard_metric_review")
                 )
                 VerticalOverviewDivider(colors.anchorDivider)
                 OverviewSubMetric(
@@ -339,7 +354,10 @@ private fun InspectionOverviewAnchorCard(
                     count = uiState.metrics.rejectCount,
                     valueColor = if (colors.isDark) Color(0xFFB3261E) else Color(0xFFF26D63),
                     labelColor = colors.anchorSubtleText,
-                    modifier = Modifier.weight(1f)
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { onDispositionClick(InspectionDisposition.REJECT) }
+                        .testTag("dashboard_metric_reject")
                 )
                 if (uiState.metrics.incompleteCount > 0) {
                     VerticalOverviewDivider(colors.anchorDivider)
@@ -348,7 +366,10 @@ private fun InspectionOverviewAnchorCard(
                         count = uiState.metrics.incompleteCount,
                         valueColor = colors.anchorSubtleText,
                         labelColor = colors.anchorSubtleText,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable { onDispositionClick(InspectionDisposition.INCOMPLETE) }
+                            .testTag("dashboard_metric_incomplete")
                     )
                 }
             }
@@ -394,7 +415,10 @@ private fun OverviewSubMetric(
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun InspectionOutcomesSection(uiState: DashboardUiState) {
+private fun InspectionOutcomesSection(
+    uiState: DashboardUiState,
+    onDispositionClick: (InspectionDisposition) -> Unit = {}
+) {
     val colors = LocalPcbColors.current
     val metrics = uiState.metrics
 
@@ -477,26 +501,34 @@ private fun InspectionOutcomesSection(uiState: DashboardUiState) {
                 dotColor = colors.passFg,
                 label = "Pass",
                 count = metrics.passCount,
-                percent = metrics.passPercent
+                percent = metrics.passPercent,
+                onClick = { onDispositionClick(InspectionDisposition.PASS) },
+                modifier = Modifier.testTag("dashboard_legend_pass")
             )
             OutcomeLegendItem(
                 dotColor = colors.reviewFg,
                 label = "Review",
                 count = metrics.reviewCount,
-                percent = metrics.reviewPercent
+                percent = metrics.reviewPercent,
+                onClick = { onDispositionClick(InspectionDisposition.REVIEW) },
+                modifier = Modifier.testTag("dashboard_legend_review")
             )
             OutcomeLegendItem(
                 dotColor = colors.rejectFg,
                 label = "Reject",
                 count = metrics.rejectCount,
-                percent = metrics.rejectPercent
+                percent = metrics.rejectPercent,
+                onClick = { onDispositionClick(InspectionDisposition.REJECT) },
+                modifier = Modifier.testTag("dashboard_legend_reject")
             )
             if (metrics.incompleteCount > 0) {
                 OutcomeLegendItem(
                     dotColor = colors.incompleteFg,
                     label = "Incomplete",
                     count = metrics.incompleteCount,
-                    percent = metrics.incompletePercent
+                    percent = metrics.incompletePercent,
+                    onClick = { onDispositionClick(InspectionDisposition.INCOMPLETE) },
+                    modifier = Modifier.testTag("dashboard_legend_incomplete")
                 )
             }
         }
@@ -508,10 +540,16 @@ private fun OutcomeLegendItem(
     dotColor: Color,
     label: String,
     count: Int,
-    percent: Float
+    percent: Float,
+    onClick: (() -> Unit)? = null,
+    modifier: Modifier = Modifier
 ) {
     val colors = LocalPcbColors.current
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    val clickMod = if (onClick != null) modifier.clickable(onClick = onClick) else modifier
+    Row(
+        modifier = clickMod,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
         Box(
             modifier = Modifier
                 .size(8.dp)
@@ -940,6 +978,7 @@ private fun RecentInspectionsSection(
 private fun ModelReadinessSection(
     detectionModelInfo: ModelInfo,
     advisoryModelInfo: ModelInfo,
+    transistorModelInfo: ModelInfo,
     onConfigureClick: () -> Unit
 ) {
     val colors = LocalPcbColors.current
@@ -983,7 +1022,16 @@ private fun ModelReadinessSection(
                     color = colors.divider
                 )
                 ModelReadinessRow(
-                    title = "Llama 3.2 1B Technical Advisory",
+                    title = "PatchCore Transistor Anomaly",
+                    subtitle = transistorModelInfo.runtimeLabel,
+                    info = transistorModelInfo
+                )
+                HorizontalDivider(
+                    modifier = Modifier.padding(horizontal = 14.dp),
+                    color = colors.divider
+                )
+                ModelReadinessRow(
+                    title = "SmolLM2 360M Technical Advisory",
                     subtitle = advisoryModelInfo.runtimeLabel,
                     info = advisoryModelInfo
                 )

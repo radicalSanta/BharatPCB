@@ -69,6 +69,9 @@ fun SettingsScreen(
     onImportDetectionModel: (Uri) -> Unit,
     onLoadDetectionModel: () -> Unit,
     onUnloadDetectionModel: () -> Unit,
+    onImportTransistorModel: (Uri) -> Unit = {},
+    onLoadTransistorModel: () -> Unit = {},
+    onUnloadTransistorModel: () -> Unit = {},
     onImportAdvisoryModel: (Uri) -> Unit,
     onImportAdvisoryTokenizer: (Uri) -> Unit,
     onLoadAdvisoryModel: () -> Unit,
@@ -88,6 +91,10 @@ fun SettingsScreen(
     val onnxPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri -> if (uri != null) onImportDetectionModel(uri) }
+
+    val transistorPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri -> if (uri != null) onImportTransistorModel(uri) }
 
     val ptePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -281,6 +288,22 @@ fun SettingsScreen(
                 )
 
                 ModelSlotPanel(
+                    info = uiState.transistorModelInfo,
+                    primaryImportLabel = "Import .onnx",
+                    onPrimaryImport = { transistorPicker.launch(arrayOf("*/*")) },
+                    secondaryImportLabel = null,
+                    onSecondaryImport = null,
+                    onLoad = onLoadTransistorModel,
+                    onUnload = onUnloadTransistorModel,
+                    onInspect = { onInspectModelMetadata(ModelSlot.TRANSISTOR_ANOMALY) }
+                )
+
+                HorizontalDivider(
+                    modifier = Modifier.padding(vertical = 12.dp),
+                    color = colors.divider
+                )
+
+                ModelSlotPanel(
                     info = uiState.advisoryModelInfo,
                     primaryImportLabel = "Import .pte",
                     onPrimaryImport = { ptePicker.launch(arrayOf("*/*")) },
@@ -356,7 +379,7 @@ fun SettingsScreen(
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(256, 320, 512).forEach { dim ->
+                    listOf(224, 256, 320, 512).forEach { dim ->
                         val active = policy.minImageWidth == dim && policy.minImageHeight == dim
                         Surface(
                             shape = RoundedCornerShape(10.dp),
@@ -503,7 +526,7 @@ fun SettingsScreen(
                 Text(
                     text = "• Real camera & gallery inspections require an imported YOLOv8n .onnx file; unready production runtime returns INCOMPLETE.\n" +
                         "• Prototype Sample Boards execute strictly through DemoPcbDetectionEngine (isDemonstration=true).\n" +
-                        "• Optional AI Technical Advisory uses ExecuTorch Android (Llama 3.2 1B .pte + tokenizer) and never alters deterministic policy dispositions.\n" +
+                        "• Optional AI Technical Advisory uses ExecuTorch Android (SmolLM2 360M .pte + tokenizer) and never alters deterministic policy dispositions.\n" +
                         "• Dataset Note: 'copper' class defaults to REQUIRES_DATASET_VERIFICATION pending training schema confirmation.",
                     style = MaterialTheme.typography.bodySmall,
                     color = colors.textSecondary

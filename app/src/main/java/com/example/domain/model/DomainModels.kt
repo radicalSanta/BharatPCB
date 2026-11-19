@@ -31,9 +31,15 @@ enum class ModelRuntimeState {
     UNLOADED
 }
 
+enum class InspectionTarget {
+    PCB_BOARD,
+    TRANSISTOR
+}
+
 enum class ModelSlot {
     PCB_DETECTION,
-    AI_ADVISORY
+    AI_ADVISORY,
+    TRANSISTOR_ANOMALY
 }
 
 enum class AdvisoryAvailability {
@@ -79,7 +85,7 @@ data class DetectedDefect(
     val confidence: Float,
     val severity: DefectSeverity,
     val requiresManualReview: Boolean,
-    val boundingBox: BoundingBox,
+    val boundingBox: BoundingBox?,
     val code: String? = null,
     val description: String? = null
 )
@@ -92,8 +98,8 @@ data class InspectionPolicyConfig(
     val reviewOnMedium: Boolean = true,
     val reviewOnLow: Boolean = false,
     val reviewOnLowClarityZeroDefects: Boolean = true,
-    val minImageWidth: Int = 256,
-    val minImageHeight: Int = 256
+    val minImageWidth: Int = DEFAULT_MIN_IMAGE_DIM,
+    val minImageHeight: Int = DEFAULT_MIN_IMAGE_DIM
 ) {
     fun effectiveThresholdsSummary(): String {
         return "critical=${if (rejectOnCritical) "REJECT" else "REVIEW"}, " +
@@ -105,7 +111,8 @@ data class InspectionPolicyConfig(
 
     companion object {
         const val DEFAULT_PROFILE_NAME = "Configurable Screening Profile (IPC-A-610 Class 2 Baseline)"
-        const val DEFAULT_POLICY_VERSION = "1.0.0-screening"
+        const val DEFAULT_POLICY_VERSION = "1.1.0-screening"
+        const val DEFAULT_MIN_IMAGE_DIM = 224
     }
 }
 
@@ -139,10 +146,20 @@ data class ModelExecutionProvenance(
 data class InspectionLatencyMetrics(
     val imagePreprocessingMs: Long? = null,
     val yoloInferenceMs: Long? = null,
+    val patchCoreInferenceMs: Long? = null,
     val outputDecodingNmsMs: Long? = null,
     val policyEvaluationMs: Long? = null,
     val llmAdvisoryMs: Long? = null,
     val totalDurationMs: Long? = null
+)
+
+@Serializable
+data class TransistorAnomalyData(
+    val rawAnomalyScore: Float,
+    val normalizedDisplayScore: Float, // Heuristic normalized display score; not a calibrated probability.
+    val isAnomalous: Boolean,
+    val affectedAreaPercent: Float? = null,
+    val boundingBox: BoundingBox? = null
 )
 
 @Serializable
@@ -187,7 +204,8 @@ sealed interface DetectionOutcome {
         val detections: List<DetectedDefect>,
         override val latencyMetrics: InspectionLatencyMetrics,
         override val provenance: ModelExecutionProvenance,
-        val isDemonstration: Boolean
+        val isDemonstration: Boolean,
+        val transistorAnomaly: TransistorAnomalyData? = null
     ) : DetectionOutcome
 
     data class Failure(
@@ -254,5 +272,14 @@ data class InspectionRecord(
     val isDemonstration: Boolean,
     val provenance: ModelExecutionProvenance,
     val advisory: AiAdvisory,
-    val latencyMetrics: InspectionLatencyMetrics
-)
+    val latencyMetrics: InspectionLatencyMetrics,
+    val target: InspectionTarget = InspectionTarget.PCB_BOARD,
+    val transistorAnomaly: TransistorAnomalyData? = null,
+    val completedEpochMs: Long? = null
+) {
+    val modelInferenceLatencyMs: Long?
+        get() = when (target) {
+            InspectionTarget.PCB_BOARD -> latencyMetrics.yoloInferenceMs
+            InspectionTarget.TRANSISTOR -> latencyMetrics.patchCoreInferenceMs
+        }
+}

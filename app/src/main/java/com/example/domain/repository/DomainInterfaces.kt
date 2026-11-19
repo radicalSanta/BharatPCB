@@ -49,6 +49,7 @@ interface ImageStorageManager {
 interface ModelManager {
     val detectionModelInfo: StateFlow<ModelInfo>
     val advisoryModelInfo: StateFlow<ModelInfo>
+    val transistorModelInfo: StateFlow<ModelInfo>
 
     suspend fun importDetectionModel(sourceUri: Uri): ModelOperationResult
     suspend fun loadDetectionModel(): ModelOperationResult
@@ -58,6 +59,10 @@ interface ModelManager {
     suspend fun importAdvisoryTokenizer(sourceUri: Uri): ModelOperationResult
     suspend fun loadAdvisoryModel(): ModelOperationResult
     suspend fun unloadAdvisoryModel(): ModelOperationResult
+
+    suspend fun importTransistorModel(sourceUri: Uri): ModelOperationResult
+    suspend fun loadTransistorModel(): ModelOperationResult
+    suspend fun unloadTransistorModel(): ModelOperationResult
 
     fun inspectModelMetadata(slot: ModelSlot): String
 }

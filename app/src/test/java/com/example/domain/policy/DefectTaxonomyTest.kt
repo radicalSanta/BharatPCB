@@ -66,4 +66,18 @@ class DefectTaxonomyTest {
         assertEquals(DefectSeverity.MANUAL_REVIEW, unknown.defaultSeverity)
         assertTrue(unknown.requiresManualReview)
     }
+
+    @Test
+    fun `transistor_anomaly resolves to dedicated MANUAL_REVIEW entry`() {
+        val entry = DefectTaxonomy.resolve("transistor_anomaly")
+        assertTrue("Must be known class", entry.isKnownClass)
+        assertEquals("transistor_anomaly", entry.normalizedKey)
+        assertEquals("Transistor Anomaly", entry.canonicalLabel)
+        assertEquals(DefectSeverity.MANUAL_REVIEW, entry.defaultSeverity)
+        assertTrue(entry.requiresManualReview)
+        assertEquals("TR-ANOMALY-REVIEW", entry.code)
+
+        val byLabel = DefectTaxonomy.resolve("Transistor Anomaly")
+        assertEquals(entry, byLabel)
+    }
 }

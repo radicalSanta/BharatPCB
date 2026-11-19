@@ -210,6 +210,78 @@ class SafeImageDecoderTest {
         assertEquals(240, probeOptions.outHeight)
     }
 
+    @Test
+    fun `dimension matrix test for 224x224 policy minimum`() {
+        val testCases = listOf(
+            Triple(223, 223, false),
+            Triple(224, 224, true),
+            Triple(225, 225, true),
+            Triple(226, 226, true),
+            Triple(227, 227, true),
+            Triple(256, 256, true),
+            Triple(512, 512, true),
+            Triple(300, 226, true),
+            Triple(226, 300, true),
+            Triple(32, 32, false),
+            Triple(300, 220, false), // one dimension below minimum
+            Triple(220, 300, false)  // other dimension below minimum
+        )
+
+        for ((w, h, expectedValid) in testCases) {
+            val bmp = createCheckerboardBitmap(w, h)
+            val bytes = encodeBitmap(bmp, Bitmap.CompressFormat.PNG)
+            val result = SafeImageDecoder.validateFromStreamProvider(
+                minWidth = 224,
+                minHeight = 224,
+                openStream = { ByteArrayInputStream(bytes) }
+            )
+            assertEquals("Case ${w}x${h} expected valid=$expectedValid", expectedValid, result.isValid)
+            assertEquals("Case ${w}x${h} expected processable=$expectedValid", expectedValid, result.isProcessable)
+            if (!expectedValid) {
+                assertNotNull("Case ${w}x${h} should have error message", result.errorMessage)
+                assertTrue(result.errorMessage!!.contains("below minimum"))
+            } else {
+                assertEquals(w, result.width)
+                assertEquals(h, result.height)
+            }
+        }
+    }
+
+    @Test
+    fun `blurry 226x226 image remains valid but indicates low clarity risk`() {
+        val flatBmp = Bitmap.createBitmap(226, 226, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.rgb(128, 128, 128))
+        }
+        val bytes = encodeBitmap(flatBmp, Bitmap.CompressFormat.PNG)
+        val result = SafeImageDecoder.validateFromStreamProvider(
+            minWidth = 224,
+            minHeight = 224,
+            openStream = { ByteArrayInputStream(bytes) }
+        )
+
+        assertTrue("Blurry 226x226 image should remain valid", result.isValid)
+        assertTrue("Blurry 226x226 image should be processable", result.isProcessable)
+        assertEquals(226, result.width)
+        assertEquals(226, result.height)
+        assertTrue("Blurry 226x226 image must flag lowClarityRisk", result.lowClarityRisk)
+        assertNotNull(result.clarityScore)
+        assertTrue(result.clarityScore!! < SafeImageDecoder.DEFAULT_LOW_CLARITY_VARIANCE_THRESHOLD)
+    }
+
+    @Test
+    fun `images larger than max edge retain bounded decoding and correct original dimensions`() {
+        val largeBmp = createCheckerboardBitmap(2400, 1800)
+        val bytes = encodeBitmap(largeBmp, Bitmap.CompressFormat.JPEG)
+        val frame = SafeImageDecoder.decodeBoundedOrientedBitmap(maxEdgePx = 1024) {
+            ByteArrayInputStream(bytes)
+        }
+        assertNotNull(frame)
+        assertEquals(2400, frame!!.originalWidth)
+        assertEquals(1800, frame.originalHeight)
+        assertTrue("Decoded bitmap width must be bounded", frame.bitmap.width <= 1200)
+        assertTrue("Decoded bitmap height must be bounded", frame.bitmap.height <= 1200)
+    }
+
     private fun createCheckerboardBitmap(width: Int, height: Int): Bitmap {
         return Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888).apply {
             for (y in 0 until height) {

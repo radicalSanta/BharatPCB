@@ -10,7 +10,7 @@ sealed interface AppRoute {
     data object Inspect : AppRoute
 
     @Serializable
-    data object History : AppRoute
+    data class History(val initialDisposition: String? = null) : AppRoute
 
     @Serializable
     data object Settings : AppRoute
@@ -29,6 +29,6 @@ enum class TopLevelDestination(
 ) {
     DASHBOARD(AppRoute.Dashboard, "Home", "nav_dashboard"),
     INSPECT(AppRoute.Inspect, "Inspect", "nav_inspect"),
-    HISTORY(AppRoute.History, "History", "nav_history"),
+    HISTORY(AppRoute.History(), "History", "nav_history"),
     SETTINGS(AppRoute.Settings, "Settings", "nav_settings")
 }

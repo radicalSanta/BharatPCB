@@ -41,6 +41,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -280,6 +281,30 @@ fun HistoryScreen(
                                 }
                             )
                         }
+                    }
+                }
+            }
+        }
+
+        if (uiState.dispositionFilter != HistoryDispositionFilter.ALL) {
+            item {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("history_active_filter_bar"),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Filtered by disposition: ${uiState.dispositionFilter.label} (${uiState.filteredRecords.size} record(s))",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.textSecondary
+                    )
+                    TextButton(
+                        onClick = { onDispositionFilterSelected(HistoryDispositionFilter.ALL) },
+                        modifier = Modifier.testTag("history_clear_filter_button")
+                    ) {
+                        Text("Clear filter")
                     }
                 }
             }

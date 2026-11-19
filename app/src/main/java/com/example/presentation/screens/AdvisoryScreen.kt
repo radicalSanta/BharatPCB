@@ -34,6 +34,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.domain.model.AdvisoryAvailability
+import com.example.domain.model.ModelRuntimeState
 import com.example.presentation.components.DemonstrationBadge
 import com.example.presentation.components.DispositionBadge
 import com.example.presentation.components.ModelStateBadge
@@ -200,12 +201,16 @@ fun AdvisoryScreen(
                                     color = colors.textPrimary
                                 )
                             }
-                            ModelStateBadge(state = uiState.advisoryModelInfo.state)
+                            val badgeState = when {
+                                uiState.advisoryModelInfo.state == ModelRuntimeState.READY -> ModelRuntimeState.ERROR
+                                else -> uiState.advisoryModelInfo.state
+                            }
+                            ModelStateBadge(state = badgeState)
                         }
 
                         Text(
                             text = advisory.unavailableReason
-                                ?: "Llama 3.2 1B ExecuTorch runtime is not loaded. Import a compatible .pte model and tokenizer in Settings to generate local engineering notes.",
+                                ?: "SmolLM2 360M ExecuTorch runtime is not loaded. Import a compatible .pte model and tokenizer in Settings to generate local engineering notes.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = colors.textSecondary
                         )

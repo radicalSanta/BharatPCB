@@ -19,6 +19,7 @@ import com.example.domain.usecase.ComputeDashboardMetricsUseCase
 import com.example.domain.usecase.RunInspectionUseCase
 import com.example.inference.ModelManagerImpl
 import com.example.inference.cv.OnnxPcbDetectionEngine
+import com.example.inference.cv.PatchCoreTransistorEngine
 import com.example.inference.demo.DemoAdvisoryEngine
 import com.example.inference.demo.DemoPcbDetectionEngine
 import com.example.inference.llm.ExecuTorchAdvisoryEngine
@@ -48,15 +49,19 @@ class AppContainer(context: Context) {
     val imageStorageManager: ImageStorageManager = ImageStorageManagerImpl(appContext)
 
     val onnxDetectionEngine: OnnxPcbDetectionEngine = OnnxPcbDetectionEngine(appContext)
+    val patchCoreDetectionEngine: PatchCoreTransistorEngine = PatchCoreTransistorEngine(appContext)
     val demoDetectionEngine: DemoPcbDetectionEngine = DemoPcbDetectionEngine()
-    val execuTorchAdvisoryEngine: ExecuTorchAdvisoryEngine = ExecuTorchAdvisoryEngine()
+    val execuTorchAdvisoryEngine: ExecuTorchAdvisoryEngine = ExecuTorchAdvisoryEngine().apply {
+        debugOutputDir = appContext.filesDir
+    }
     val demoAdvisoryEngine: DemoAdvisoryEngine = DemoAdvisoryEngine()
 
     val modelManager: ModelManager = ModelManagerImpl(
         context = appContext,
         settingsRepository = settingsRepositoryImpl,
         onnxEngine = onnxDetectionEngine,
-        execuTorchEngine = execuTorchAdvisoryEngine
+        execuTorchEngine = execuTorchAdvisoryEngine,
+        patchCoreEngine = patchCoreDetectionEngine
     )
 
     val csvExportManagerImpl: CsvExportManagerImpl = CsvExportManagerImpl()
@@ -74,6 +79,7 @@ class AppContainer(context: Context) {
         policyEngine = policyEngine,
         productionDetectionEngine = onnxDetectionEngine,
         demoDetectionEngine = demoDetectionEngine,
+        patchCoreEngine = patchCoreDetectionEngine,
         productionAdvisoryEngine = execuTorchAdvisoryEngine,
         demoAdvisoryEngine = demoAdvisoryEngine,
         inspectionRepository = inspectionRepository,
@@ -94,6 +100,9 @@ class AppContainer(context: Context) {
                 execuTorchAdvisoryEngine.setConfiguredArtifacts(
                     modelFile = artifacts.advisoryModelPath?.let(::File),
                     tokenizerFile = artifacts.advisoryTokenizerPath?.let(::File)
+                )
+                patchCoreDetectionEngine.setConfiguredArtifact(
+                    artifacts.transistorModelPath?.let(::File)
                 )
             }
             runCatching { csvLogger.processPendingOutboxEvents() }

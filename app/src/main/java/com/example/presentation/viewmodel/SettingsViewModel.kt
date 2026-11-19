@@ -39,6 +39,7 @@ data class SettingsUiState(
     val policyConfig: InspectionPolicyConfig = InspectionPolicyConfig(),
     val detectionModelInfo: ModelInfo,
     val advisoryModelInfo: ModelInfo,
+    val transistorModelInfo: ModelInfo,
     val totalRecordsCount: Int = 0,
     val storageStats: StorageStatsSnapshot = StorageStatsSnapshot(),
     val isBusy: Boolean = false,
@@ -72,21 +73,27 @@ class SettingsViewModel(
     private val _controls = MutableStateFlow(LocalControls())
     private var latestRecords: List<InspectionRecord> = emptyList()
 
+    private val modelInfosFlow = combine(
+        modelManager.detectionModelInfo,
+        modelManager.advisoryModelInfo,
+        modelManager.transistorModelInfo
+    ) { det, adv, trans -> Triple(det, adv, trans) }
+
     val uiState: StateFlow<SettingsUiState> = combine(
         settingsRepository.themeMode,
         settingsRepository.policyConfig,
-        modelManager.detectionModelInfo,
-        modelManager.advisoryModelInfo,
+        modelInfosFlow,
         combine(inspectionRepository.observeAllRecords(), _controls) { records, ctrl ->
             latestRecords = records
             records.size to ctrl
         }
-    ) { theme, policy, detInfo, advInfo, (recordCount, ctrl) ->
+    ) { theme, policy, (detInfo, advInfo, transInfo), (recordCount, ctrl) ->
         SettingsUiState(
             themeMode = theme,
             policyConfig = policy,
             detectionModelInfo = detInfo,
             advisoryModelInfo = advInfo,
+            transistorModelInfo = transInfo,
             totalRecordsCount = recordCount,
             storageStats = ctrl.storageStats,
             isBusy = ctrl.isBusy,
@@ -101,7 +108,8 @@ class SettingsViewModel(
         started = SharingStarted.WhileSubscribed(5_000),
         initialValue = SettingsUiState(
             detectionModelInfo = modelManager.detectionModelInfo.value,
-            advisoryModelInfo = modelManager.advisoryModelInfo.value
+            advisoryModelInfo = modelManager.advisoryModelInfo.value,
+            transistorModelInfo = modelManager.transistorModelInfo.value
         )
     )
 
@@ -140,6 +148,18 @@ class SettingsViewModel(
         runModelOperation { modelManager.unloadDetectionModel() }
     }
 
+    fun importTransistorModel(uri: Uri) {
+        runModelOperation { modelManager.importTransistorModel(uri) }
+    }
+
+    fun loadTransistorModel() {
+        runModelOperation { modelManager.loadTransistorModel() }
+    }
+
+    fun unloadTransistorModel() {
+        runModelOperation { modelManager.unloadTransistorModel() }
+    }
+
     fun importAdvisoryModel(uri: Uri) {
         runModelOperation { modelManager.importAdvisoryModel(uri) }
     }
@@ -159,7 +179,8 @@ class SettingsViewModel(
     fun inspectModelMetadata(slot: ModelSlot) {
         val title = when (slot) {
             ModelSlot.PCB_DETECTION -> "YOLOv8n ONNX Runtime Metadata"
-            ModelSlot.AI_ADVISORY -> "Llama 3.2 1B ExecuTorch Metadata"
+            ModelSlot.AI_ADVISORY -> "SmolLM2 360M ExecuTorch Metadata"
+            ModelSlot.TRANSISTOR_ANOMALY -> "PatchCore Transistor Anomaly Metadata"
         }
         val body = modelManager.inspectModelMetadata(slot)
         _controls.update {

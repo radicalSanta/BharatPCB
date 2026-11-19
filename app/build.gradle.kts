@@ -122,7 +122,11 @@ dependencies {
   implementation(libs.kotlinx.coroutines.core)
   implementation(libs.kotlinx.serialization.json)
   implementation(libs.onnxruntime.android)
-  implementation(libs.executorch.android)
+  val localExecutorchAar = file("libs/executorch.aar").takeIf { it.exists() }
+    ?: file("${System.getProperty("user.home")}/executorch-runtime-test/1.6.0/executorch.aar")
+  implementation(files(localExecutorchAar))
+  implementation(libs.fbjni)
+  implementation(libs.nativeloader)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)

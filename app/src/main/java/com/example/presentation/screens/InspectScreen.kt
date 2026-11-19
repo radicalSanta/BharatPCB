@@ -64,6 +64,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
@@ -76,6 +77,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
+import com.example.domain.model.InspectionTarget
 import com.example.domain.model.ModelRuntimeState
 import com.example.domain.model.PcbImageSource
 import com.example.domain.model.SamplePcbPreset
@@ -101,7 +103,8 @@ fun InspectScreen(
     onClearSelectedImage: () -> Unit,
     onDismissError: () -> Unit,
     onStartInspectionClick: () -> Unit,
-    onOpenSettingsClick: () -> Unit
+    onOpenSettingsClick: () -> Unit,
+    onTargetSelected: (InspectionTarget) -> Unit = {}
 ) {
     val context = LocalContext.current
     val colors = LocalPcbColors.current
@@ -157,10 +160,17 @@ fun InspectScreen(
     if (showRuntimeDialog) {
         RuntimeStatusDialog(
             detectionModelInfo = uiState.detectionModelInfo,
-            advisoryModelInfo = uiState.detectionModelInfo,
+            advisoryModelInfo = uiState.advisoryModelInfo,
+            transistorModelInfo = uiState.transistorModelInfo,
             onOpenSettings = onOpenSettingsClick,
             onDismiss = { showRuntimeDialog = false }
         )
+    }
+
+    val activeModelReady = if (uiState.selectedTarget == InspectionTarget.TRANSISTOR) {
+        uiState.transistorModelInfo.state == ModelRuntimeState.READY
+    } else {
+        uiState.detectionModelInfo.state == ModelRuntimeState.READY
     }
 
     LazyColumn(
@@ -173,7 +183,7 @@ fun InspectScreen(
         item {
             BrandHeader(
                 onRuntimeStatusClick = { showRuntimeDialog = true },
-                hasRuntimeAlert = uiState.detectionModelInfo.state != ModelRuntimeState.READY
+                hasRuntimeAlert = !activeModelReady
             )
             Text(
                 text = "New Inspection",
@@ -182,10 +192,71 @@ fun InspectScreen(
                 color = colors.textPrimary
             )
             Text(
-                text = "Acquire & validate PCB optical frame",
+                text = "Acquire & validate ${if (uiState.selectedTarget == InspectionTarget.TRANSISTOR) "transistor" else "PCB"} optical frame",
                 style = MaterialTheme.typography.bodyMedium,
                 color = colors.textSecondary
             )
+        }
+
+        item {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = colors.surfaceCard,
+                border = BorderStroke(1.dp, colors.divider),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("inspect_target_selector")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    val pcbSelected = uiState.selectedTarget == InspectionTarget.PCB_BOARD
+                    val transistorSelected = uiState.selectedTarget == InspectionTarget.TRANSISTOR
+
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (pcbSelected) colors.anchorSurface else Color.Transparent,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable(enabled = !uiState.isRunningInspection) {
+                                onTargetSelected(InspectionTarget.PCB_BOARD)
+                            }
+                            .testTag("inspect_target_pcb")
+                    ) {
+                        Text(
+                            text = "PCB Board (YOLO)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (pcbSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (pcbSelected) colors.onAnchorSurface else colors.textSecondary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(vertical = 10.dp)
+                        )
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = if (transistorSelected) colors.anchorSurface else Color.Transparent,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable(enabled = !uiState.isRunningInspection) {
+                                onTargetSelected(InspectionTarget.TRANSISTOR)
+                            }
+                            .testTag("inspect_target_transistor")
+                    ) {
+                        Text(
+                            text = "Transistor (PatchCore)",
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (transistorSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (transistorSelected) colors.onAnchorSurface else colors.textSecondary,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier.padding(vertical = 10.dp)
+                        )
+                    }
+                }
+            }
         }
 
         if (permissionDeniedBanner) {
@@ -206,7 +277,11 @@ fun InspectScreen(
                             color = colors.reviewFg
                         )
                         Text(
-                            text = "You can still upload a PCB image from Photo Picker, load a sample board below, or retry camera permission.",
+                            text = if (uiState.selectedTarget == InspectionTarget.TRANSISTOR) {
+                                "You can still upload a transistor image from Photo Picker or retry camera permission."
+                            } else {
+                                "You can still upload a PCB image from Photo Picker, load a sample board below, or retry camera permission."
+                            },
                             style = MaterialTheme.typography.bodySmall,
                             color = colors.textPrimary
                         )
@@ -275,7 +350,15 @@ fun InspectScreen(
                 OutlinedTextField(
                     value = uiState.boardName,
                     onValueChange = onBoardNameChanged,
-                    label = { Text("Board Identifier / Name") },
+                    label = {
+                        Text(
+                            if (uiState.selectedTarget == InspectionTarget.TRANSISTOR) {
+                                "Component Identifier / Name"
+                            } else {
+                                "Board Identifier / Name"
+                            }
+                        )
+                    },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -286,42 +369,85 @@ fun InspectScreen(
         }
 
         if (uiState.selectedSourceType != null &&
-            uiState.selectedSourceType != PcbImageSource.SAMPLE &&
-            uiState.detectionModelInfo.state != ModelRuntimeState.READY
+            uiState.selectedSourceType != PcbImageSource.SAMPLE
         ) {
-            item {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = colors.incompleteBg,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("inspect_production_model_warning")
-                ) {
-                    Row(
-                        modifier = Modifier.padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
+            if (uiState.selectedTarget == InspectionTarget.PCB_BOARD &&
+                uiState.detectionModelInfo.state != ModelRuntimeState.READY
+            ) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = colors.incompleteBg,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("inspect_production_model_warning")
                     ) {
-                        Icon(
-                            imageVector = Icons.Outlined.Info,
-                            contentDescription = null,
-                            tint = colors.incompleteFg
-                        )
-                        Spacer(modifier = Modifier.width(10.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "YOLOv8n ONNX detector is ${uiState.detectionModelInfo.state.name}",
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = FontWeight.Bold,
-                                color = colors.textPrimary
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Info,
+                                contentDescription = null,
+                                tint = colors.incompleteFg
                             )
-                            Text(
-                                text = "Real camera/gallery images never fall back to demo inference. Running now will record INCOMPLETE until you import a .onnx model in Settings.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = colors.textSecondary
-                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "YOLOv8n ONNX detector is ${uiState.detectionModelInfo.state.name}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                                Text(
+                                    text = "Real camera/gallery images never fall back to demo inference. Running now will record INCOMPLETE until you import a .onnx model in Settings.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.textSecondary
+                                )
+                            }
+                            TextButton(onClick = onOpenSettingsClick) {
+                                Text("Settings")
+                            }
                         }
-                        TextButton(onClick = onOpenSettingsClick) {
-                            Text("Settings")
+                    }
+                }
+            } else if (uiState.selectedTarget == InspectionTarget.TRANSISTOR &&
+                uiState.transistorModelInfo.state != ModelRuntimeState.READY
+            ) {
+                item {
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = colors.incompleteBg,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("inspect_transistor_model_warning")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Outlined.Info,
+                                contentDescription = null,
+                                tint = colors.incompleteFg
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "PatchCore ONNX detector is ${uiState.transistorModelInfo.state.name}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = colors.textPrimary
+                                )
+                                Text(
+                                    text = "Transistor anomaly inspection requires an imported and loaded PatchCore model. You must load the model in Settings before starting inspection.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = colors.textSecondary
+                                )
+                            }
+                            TextButton(onClick = onOpenSettingsClick) {
+                                Text("Settings")
+                            }
                         }
                     }
                 }
@@ -354,13 +480,13 @@ fun InspectScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.CameraAlt,
-                            contentDescription = "Capture PCB",
+                            contentDescription = "Capture Optical Frame",
                             tint = colors.textPrimary,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Capture PCB",
+                            text = if (uiState.selectedTarget == InspectionTarget.TRANSISTOR) "Capture Transistor" else "Capture PCB",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.SemiBold,
                             color = colors.textPrimary
@@ -390,13 +516,13 @@ fun InspectScreen(
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.PhotoLibrary,
-                            contentDescription = "Upload PCB",
+                            contentDescription = "Upload Optical Frame",
                             tint = colors.textPrimary,
                             modifier = Modifier.size(20.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "Upload PCB",
+                            text = if (uiState.selectedTarget == InspectionTarget.TRANSISTOR) "Upload Transistor" else "Upload PCB",
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.SemiBold,
                             color = colors.textPrimary
@@ -450,39 +576,60 @@ fun InspectScreen(
             }
         }
 
-        // Prototype Sample Boards (Quick Load)
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "Prototype Sample Boards (Quick Load)",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = colors.textPrimary
-                )
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = colors.surfaceCard,
-                    border = BorderStroke(1.dp, colors.divider),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column {
-                        uiState.samplePresets.forEachIndexed { index, preset ->
-                            SamplePresetRow(
-                                preset = preset,
-                                enabled = !uiState.isRunningInspection,
-                                onClick = { onSamplePresetSelected(preset) }
-                            )
-                            if (index < uiState.samplePresets.lastIndex) {
-                                HorizontalDivider(
-                                    modifier = Modifier.padding(horizontal = 14.dp),
-                                    color = colors.divider
+        if (uiState.selectedTarget == InspectionTarget.PCB_BOARD) {
+            // Prototype Sample Boards (Quick Load)
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Prototype Sample Boards (Quick Load)",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        color = colors.textPrimary
+                    )
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = colors.surfaceCard,
+                        border = BorderStroke(1.dp, colors.divider),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column {
+                            uiState.samplePresets.forEachIndexed { index, preset ->
+                                SamplePresetRow(
+                                    preset = preset,
+                                    enabled = !uiState.isRunningInspection,
+                                    onClick = { onSamplePresetSelected(preset) }
                                 )
+                                if (index < uiState.samplePresets.lastIndex) {
+                                    HorizontalDivider(
+                                        modifier = Modifier.padding(horizontal = 14.dp),
+                                        color = colors.divider
+                                    )
+                                }
                             }
                         }
                     }
                 }
+                Spacer(modifier = Modifier.height(12.dp))
             }
-            Spacer(modifier = Modifier.height(12.dp))
+        } else {
+            item {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = colors.surfaceSubtle,
+                    border = BorderStroke(1.dp, colors.divider),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("inspect_transistor_sample_notice")
+                ) {
+                    Text(
+                        text = "Sample presets are only available for PCB Board demo mode. Transistor anomaly inspection requires real camera capture or photo upload with an imported, ready PatchCore model.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.textSecondary,
+                        modifier = Modifier.padding(14.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+            }
         }
     }
 }
@@ -537,7 +684,9 @@ private fun PcbPreviewViewport(
                     ) {
                         AsyncImage(
                             model = Uri.parse(uiState.selectedImageUri),
-                            contentDescription = uiState.boardName.ifBlank { "Selected PCB preview" },
+                            contentDescription = uiState.boardName.ifBlank {
+                                if (uiState.selectedTarget == InspectionTarget.TRANSISTOR) "Selected transistor preview" else "Selected PCB preview"
+                            },
                             contentScale = ContentScale.Fit,
                             modifier = Modifier.fillMaxSize()
                         )
@@ -552,7 +701,7 @@ private fun PcbPreviewViewport(
                         ) {
                             Icon(
                                 imageVector = Icons.Outlined.Close,
-                                contentDescription = "Clear selected PCB image",
+                                contentDescription = if (uiState.selectedTarget == InspectionTarget.TRANSISTOR) "Clear selected transistor image" else "Clear selected PCB image",
                                 tint = colors.textPrimary
                             )
                         }
@@ -616,15 +765,20 @@ private fun PcbPreviewViewport(
                         modifier = Modifier.size(46.dp)
                     )
                     Spacer(modifier = Modifier.height(14.dp))
+                    val isTransistor = uiState.selectedTarget == InspectionTarget.TRANSISTOR
                     Text(
-                        text = "No PCB image selected",
+                        text = if (isTransistor) "No transistor image selected" else "No PCB image selected",
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = colors.textPrimary
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
-                        text = "Capture a board photo, upload from gallery, or load a sample PCB below.",
+                        text = if (isTransistor) {
+                            "Capture a transistor photo or upload an image from gallery."
+                        } else {
+                            "Capture a board photo, upload from gallery, or load a sample PCB below."
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = colors.textSecondary,
                         textAlign = TextAlign.Center

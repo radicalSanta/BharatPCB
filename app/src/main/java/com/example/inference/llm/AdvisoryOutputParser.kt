@@ -29,7 +29,8 @@ object AdvisoryOutputParser {
         hasVerifiedReferences: Boolean,
         isDemonstration: Boolean,
         latencyMs: Long?,
-        provenanceSummary: String
+        provenanceSummary: String,
+        hasZeroDefects: Boolean = (officialDisposition == InspectionDisposition.PASS)
     ): AiAdvisory {
         val candidateJson = extractJsonObject(rawText)
             ?: return unavailable(
@@ -61,6 +62,22 @@ object AdvisoryOutputParser {
             )
         }
 
+        // Reject unpopulated template placeholders
+        val placeholders = listOf("<1 concise", "<concise", "<verified", "<explicit", "placeholder", "todo")
+        if (placeholders.any {
+                rootCause.contains(it, ignoreCase = true) ||
+                action.contains(it, ignoreCase = true) ||
+                limitations.contains(it, ignoreCase = true)
+            }
+        ) {
+            return unavailable(
+                isDemonstration = isDemonstration,
+                reason = "LLM output contained unpopulated placeholder templates.",
+                latencyMs = latencyMs,
+                provenanceSummary = provenanceSummary
+            )
+        }
+
         if (rootCause.length > MAX_FIELD_LEN ||
             action.length > MAX_FIELD_LEN ||
             rawStandard.length > 400 ||
@@ -72,6 +89,23 @@ object AdvisoryOutputParser {
                 latencyMs = latencyMs,
                 provenanceSummary = provenanceSummary
             )
+        }
+
+        // Strict zero-defect validation: never allow model to hallucinate defect causes when 0 defects exist
+        if (hasZeroDefects) {
+            val lowerRc = rootCause.lowercase()
+            val fabricatedDefectKeywords = listOf(
+                "short circuit", "solder bridge", "copper spur", "mouse bite",
+                "missing component", "pin hole", "open circuit"
+            )
+            if (fabricatedDefectKeywords.any { lowerRc.contains(it) }) {
+                return unavailable(
+                    isDemonstration = isDemonstration,
+                    reason = "LLM fabricated defects on a clean board with zero localized detections.",
+                    latencyMs = latencyMs,
+                    provenanceSummary = provenanceSummary
+                )
+            }
         }
 
         // Guard against ungrounded standard citations or compliance claims
@@ -107,10 +141,51 @@ object AdvisoryOutputParser {
     }
 
     private fun extractJsonObject(raw: String): String? {
-        val start = raw.indexOf('{')
-        val end = raw.lastIndexOf('}')
-        if (start < 0 || end <= start) return null
-        return raw.substring(start, end + 1)
+        val trimmed = raw.trim()
+        val cleaned = if (trimmed.startsWith("```json", ignoreCase = true)) {
+            trimmed.removePrefix("```json").removePrefix("```JSON").removeSuffix("```").trim()
+        } else if (trimmed.startsWith("```")) {
+            trimmed.removePrefix("```").removeSuffix("```").trim()
+        } else {
+            trimmed
+        }
+        val start = cleaned.indexOf('{')
+        if (start < 0) return null
+
+        var depth = 0
+        var inString = false
+        var escape = false
+        var end = -1
+
+        for (i in start until cleaned.length) {
+            val c = cleaned[i]
+            if (escape) {
+                escape = false
+                continue
+            }
+            if (c == '\\' && inString) {
+                escape = true
+                continue
+            }
+            if (c == '"') {
+                inString = !inString
+                continue
+            }
+            if (!inString) {
+                if (c == '{') {
+                    depth++
+                } else if (c == '}') {
+                    depth--
+                    if (depth == 0) {
+                        end = i
+                        break
+                    }
+                }
+            }
+        }
+
+        if (end <= start) return null
+        return cleaned.substring(start, end + 1)
     }
 
     private fun unavailable(

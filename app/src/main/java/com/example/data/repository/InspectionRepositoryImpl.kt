@@ -15,8 +15,10 @@ import com.example.domain.model.InspectionDisposition
 import com.example.domain.model.InspectionLatencyMetrics
 import com.example.domain.model.InspectionPolicyConfig
 import com.example.domain.model.InspectionRecord
+import com.example.domain.model.InspectionTarget
 import com.example.domain.model.ModelExecutionProvenance
 import com.example.domain.model.PcbImageSource
+import com.example.domain.model.TransistorAnomalyData
 import com.example.domain.repository.InspectionRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
@@ -124,11 +126,27 @@ class InspectionRepositoryImpl(
             latencyMetrics = InspectionLatencyMetrics(
                 imagePreprocessingMs = record.imagePreprocessingMs,
                 yoloInferenceMs = record.yoloInferenceMs,
+                patchCoreInferenceMs = record.patchCoreInferenceMs,
                 outputDecodingNmsMs = record.outputDecodingNmsMs,
                 policyEvaluationMs = record.policyEvaluationMs,
                 llmAdvisoryMs = record.llmAdvisoryMs,
                 totalDurationMs = record.totalDurationMs
-            )
+            ),
+            target = enumOrDefault(record.target, InspectionTarget.PCB_BOARD),
+            transistorAnomaly = if (record.transistorRawScore != null && record.transistorDisplayScore != null && record.transistorIsAnomalous != null) {
+                TransistorAnomalyData(
+                    rawAnomalyScore = record.transistorRawScore,
+                    normalizedDisplayScore = record.transistorDisplayScore,
+                    isAnomalous = record.transistorIsAnomalous,
+                    affectedAreaPercent = record.transistorAffectedAreaPercent,
+                    boundingBox = defects.firstOrNull()?.let { d ->
+                        if (d.bboxX != null && d.bboxY != null && d.bboxWidth != null && d.bboxHeight != null) {
+                            BoundingBox(d.bboxX, d.bboxY, d.bboxWidth, d.bboxHeight)
+                        } else null
+                    }
+                )
+            } else null,
+            completedEpochMs = record.completedEpochMs
         )
     }
 
@@ -141,7 +159,11 @@ class InspectionRepositoryImpl(
             confidence = confidence,
             severity = enumOrDefault(severity, DefectSeverity.MANUAL_REVIEW),
             requiresManualReview = requiresManualReview,
-            boundingBox = BoundingBox(bboxX, bboxY, bboxWidth, bboxHeight),
+            boundingBox = if (bboxX != null && bboxY != null && bboxWidth != null && bboxHeight != null) {
+                BoundingBox(bboxX, bboxY, bboxWidth, bboxHeight)
+            } else {
+                null
+            },
             code = code,
             description = description
         )
@@ -183,10 +205,17 @@ class InspectionRepositoryImpl(
             advisoryProvenanceSummary = advisory.provenanceSummary,
             imagePreprocessingMs = latencyMetrics.imagePreprocessingMs,
             yoloInferenceMs = latencyMetrics.yoloInferenceMs,
+            patchCoreInferenceMs = latencyMetrics.patchCoreInferenceMs,
             outputDecodingNmsMs = latencyMetrics.outputDecodingNmsMs,
             policyEvaluationMs = latencyMetrics.policyEvaluationMs,
             llmAdvisoryMs = latencyMetrics.llmAdvisoryMs,
-            totalDurationMs = latencyMetrics.totalDurationMs
+            totalDurationMs = latencyMetrics.totalDurationMs,
+            target = target.name,
+            transistorRawScore = transistorAnomaly?.rawAnomalyScore,
+            transistorDisplayScore = transistorAnomaly?.normalizedDisplayScore,
+            transistorIsAnomalous = transistorAnomaly?.isAnomalous,
+            transistorAffectedAreaPercent = transistorAnomaly?.affectedAreaPercent,
+            completedEpochMs = completedEpochMs
         )
 
     private fun DetectedDefect.toEntity(inspectionId: String): DetectedDefectEntity =
@@ -199,10 +228,10 @@ class InspectionRepositoryImpl(
             confidence = confidence,
             severity = severity.name,
             requiresManualReview = requiresManualReview,
-            bboxX = boundingBox.x,
-            bboxY = boundingBox.y,
-            bboxWidth = boundingBox.width,
-            bboxHeight = boundingBox.height,
+            bboxX = boundingBox?.x,
+            bboxY = boundingBox?.y,
+            bboxWidth = boundingBox?.width,
+            bboxHeight = boundingBox?.height,
             code = code,
             description = description
         )

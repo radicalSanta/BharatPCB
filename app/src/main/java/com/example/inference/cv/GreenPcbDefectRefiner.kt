@@ -5,14 +5,13 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * Green populated PCB sub-classifier for YOLO class ID 9 ("scratch").
+ * Green populated PCB defect refiner (no-op).
  *
- * Matches reference_python/vision_runtime.py `refine_populated_defect_class`:
- * - Only applies when cid == 9 and >= 15% of frame pixels match OpenCV HSV green solder mask
- *   (H in [35, 95] on 0..179 scale, S >= 40 on 0..255 scale).
- * - If ROI dark/charred pixels (V < 65) >= 16% -> remap to class 5 ("missing_copper").
- * - Else if ROI bright metallic solder pixels (V > 165 and S < 75) >= 25% -> remap to class 1 ("short").
- * - Else keep class 9 ("scratch").
+ * Automatic HSV-based class remapping was removed from production inference to eliminate
+ * false short-circuit (class 1) and missing-copper (class 5) classifications from background
+ * textures, white cloth, metal connectors, and bright metallic ROIs.
+ *
+ * Preserves the original YOLO model classification directly.
  */
 object GreenPcbDefectRefiner {
     const val TARGET_SCRATCH_CLASS_ID = 9
@@ -68,6 +67,10 @@ object GreenPcbDefectRefiner {
         return (greenCount.toFloat() / pixels.size.toFloat()) >= GREEN_BOARD_MIN_RATIO
     }
 
+    /**
+     * Preserves original YOLO class ID directly without HSV-based remapping.
+     * Automatic remapping to class 1 (short) or class 5 (missing_copper) has been removed.
+     */
     fun refineClassId(
         bitmap: Bitmap,
         x1: Int,
@@ -76,58 +79,12 @@ object GreenPcbDefectRefiner {
         y2: Int,
         classId: Int,
         knownGreenBoard: Boolean? = null
-    ): Int {
-        if (classId != TARGET_SCRATCH_CLASS_ID) return classId
-        val w = bitmap.width
-        val h = bitmap.height
-        if (w <= 0 || h <= 0) return classId
+    ): Int = classId
 
-        val isGreen = knownGreenBoard ?: isGreenSolderMaskBoard(bitmap)
-        if (!isGreen) return classId
-
-        val rx1 = max(0, min(w - 1, x1))
-        val ry1 = max(0, min(h - 1, y1))
-        val rx2 = min(w, max(rx1 + 1, x2))
-        val ry2 = min(h, max(ry1 + 1, y2))
-        val roiW = rx2 - rx1
-        val roiH = ry2 - ry1
-        if (roiW <= 0 || roiH <= 0) return classId
-
-        val roiPixels = IntArray(roiW * roiH)
-        bitmap.getPixels(roiPixels, 0, roiW, rx1, ry1, roiW, roiH)
-        return refineRoiPixels(roiPixels, classId)
-    }
-
-    internal fun refineRoiPixels(roiPixels: IntArray, classId: Int): Int {
-        if (classId != TARGET_SCRATCH_CLASS_ID || roiPixels.isEmpty()) return classId
-
-        var charCount = 0
-        var solderCount = 0
-        for (px in roiPixels) {
-            val r = (px shr 16) and 0xFF
-            val g = (px shr 8) and 0xFF
-            val b = px and 0xFF
-            val packedHsv = rgbToOpenCvHsvPacked(r, g, b)
-            val sCv = (packedHsv ushr 8) and 0xFF
-            val vCv = packedHsv and 0xFF
-            if (vCv < CHAR_MAX_V_CV_EXCLUSIVE) {
-                charCount++
-            }
-            if (vCv > SOLDER_MIN_V_CV_EXCLUSIVE && sCv < SOLDER_MAX_S_CV_EXCLUSIVE) {
-                solderCount++
-            }
-        }
-
-        val total = roiPixels.size.toFloat()
-        val charRatio = charCount.toFloat() / total
-        val solderRatio = solderCount.toFloat() / total
-
-        return when {
-            charRatio >= CHAR_MIN_RATIO -> REMAPPED_MISSING_COPPER_CLASS_ID
-            solderRatio >= SOLDER_MIN_RATIO -> REMAPPED_SHORT_CLASS_ID
-            else -> TARGET_SCRATCH_CLASS_ID
-        }
-    }
+    /**
+     * Preserves original YOLO class ID directly without HSV-based remapping.
+     */
+    internal fun refineRoiPixels(roiPixels: IntArray, classId: Int): Int = classId
 
     /**
      * Converts 8-bit RGB (0..255) to packed OpenCV `RGB2HSV_b` 8-bit HSV using 12-bit fixed-point LUTs:

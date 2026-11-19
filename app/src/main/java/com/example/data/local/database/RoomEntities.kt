@@ -53,10 +53,18 @@ data class InspectionRecordEntity(
     // Nullable stage timings
     val imagePreprocessingMs: Long?,
     val yoloInferenceMs: Long?,
+    val patchCoreInferenceMs: Long? = null,
     val outputDecodingNmsMs: Long?,
     val policyEvaluationMs: Long?,
     val llmAdvisoryMs: Long?,
-    val totalDurationMs: Long?
+    val totalDurationMs: Long?,
+    // v2 additions
+    val target: String = "PCB_BOARD",
+    val transistorRawScore: Float? = null,
+    val transistorDisplayScore: Float? = null,
+    val transistorIsAnomalous: Boolean? = null,
+    val transistorAffectedAreaPercent: Float? = null,
+    val completedEpochMs: Long? = null
 )
 
 @Entity(
@@ -80,10 +88,10 @@ data class DetectedDefectEntity(
     val confidence: Float,
     val severity: String,
     val requiresManualReview: Boolean,
-    val bboxX: Float,
-    val bboxY: Float,
-    val bboxWidth: Float,
-    val bboxHeight: Float,
+    val bboxX: Float?,
+    val bboxY: Float?,
+    val bboxWidth: Float?,
+    val bboxHeight: Float?,
     val code: String?,
     val description: String?
 )

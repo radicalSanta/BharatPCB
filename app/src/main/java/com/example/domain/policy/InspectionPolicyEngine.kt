@@ -63,7 +63,7 @@ class InspectionPolicyEngine {
                 requiresManualReview = taxonomy.requiresManualReview || !taxonomy.isKnownClass,
                 code = rawDefect.code ?: taxonomy.code,
                 description = rawDefect.description ?: taxonomy.description,
-                boundingBox = rawDefect.boundingBox.clamped()
+                boundingBox = rawDefect.boundingBox?.clamped()
             )
         }
 
